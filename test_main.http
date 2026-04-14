@@ -1,0 +1,20 @@
+# FastAPI smoke test
+
+GET http://127.0.0.1:8000/health
+Accept: application/json
+
+###
+
+POST http://127.0.0.1:8000/api/v1/tasks/search
+Content-Type: application/json
+
+{
+	"query": "上海 AI 产品经理 简历 模板",
+	"max_results": 10
+}
+
+###
+
+@task_id = e205cacc
+GET http://127.0.0.1:8000/api/v1/tasks/{{task_id}}
+Accept: application/json

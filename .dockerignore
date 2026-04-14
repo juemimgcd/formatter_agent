@@ -1,0 +1,15 @@
+.git
+.idea
+.venv
+__pycache__
+*.py[cod]
+.pytest_cache
+.mypy_cache
+.coverage
+outputs
+storage
+tests
+todo
+test_main.http
+flowchart.png
+.env
