@@ -57,7 +57,7 @@ POST /tasks/search
 BackgroundTasks
 -> Celery
 -> timeout / retry
--> cancel / retry API
+-> retry API
 -> observability
 ```
 
@@ -111,7 +111,7 @@ flowchart TD
 白话理解：
 
 - 没有记录层，就没有可靠的任务系统
-- 没有完整状态字段，后面所有“重试、取消、排障”都站不住
+- 没有完整状态字段，后面所有“重试、排障”都站不住
 
 #### 第 3 层：派发边界层
 
@@ -222,7 +222,6 @@ request
 - `success`
 - `failed`
 - `timeout`
-- `cancelled`
 - `retrying`
 - `empty_result`
 
@@ -331,7 +330,6 @@ class TaskStatus(StrEnum):
     SUCCESS = "success"
     FAILED = "failed"
     TIMEOUT = "timeout"
-    CANCELLED = "cancelled"
     RETRYING = "retrying"
     EMPTY_RESULT = "empty_result"
 
@@ -394,7 +392,6 @@ TERMINAL_STATUSES = {
     TaskStatus.SUCCESS,
     TaskStatus.FAILED,
     TaskStatus.TIMEOUT,
-    TaskStatus.CANCELLED,
     TaskStatus.EMPTY_RESULT,
 }
 
@@ -405,8 +402,8 @@ def is_terminal_status(status: str) -> bool:
 
 def can_transition(from_status: str, to_status: str) -> bool:
     allowed = {
-        TaskStatus.CREATED: {TaskStatus.QUEUED, TaskStatus.CANCELLED, TaskStatus.FAILED},
-        TaskStatus.QUEUED: {TaskStatus.RUNNING, TaskStatus.CANCELLED, TaskStatus.TIMEOUT},
+        TaskStatus.CREATED: {TaskStatus.QUEUED, TaskStatus.FAILED},
+        TaskStatus.QUEUED: {TaskStatus.RUNNING, TaskStatus.TIMEOUT},
         TaskStatus.RUNNING: {
             TaskStatus.SUCCESS,
             TaskStatus.PARTIAL_SUCCESS,
@@ -414,7 +411,6 @@ def can_transition(from_status: str, to_status: str) -> bool:
             TaskStatus.FAILED,
             TaskStatus.TIMEOUT,
             TaskStatus.RETRYING,
-            TaskStatus.CANCELLED,
         },
         TaskStatus.RETRYING: {TaskStatus.QUEUED, TaskStatus.FAILED, TaskStatus.TIMEOUT},
     }

@@ -119,7 +119,6 @@ partial_success
 success
 failed
 timeout
-cancelled
 retrying
 empty_result
 ```
@@ -136,7 +135,6 @@ empty_result
 
 - `partial_success`
 - `timeout`
-- `cancelled`
 - `retrying`
 - `empty_result`
 
@@ -170,7 +168,6 @@ empty_result
 还缺：
 
 - 任务列表
-- 取消任务
 - 重试任务
 - 查询裁剪参数
 
@@ -275,8 +272,7 @@ empty_result
 
 1. `GET /api/v1/tasks`
 2. `POST /api/v1/tasks/{task_id}/retry`
-3. `POST /api/v1/tasks/{task_id}/cancel`
-4. 查询结果裁剪参数
+3. 查询结果裁剪参数
 
 ### Phase E：补监控和排障能力
 
@@ -309,7 +305,7 @@ empty_result
 
 因为现在“有结果就 success”仍然过于粗糙，不利于前端和调用方理解结果质量。
 
-### 3. 补任务列表 / 重试 / 取消接口
+### 3. 补任务列表 / 重试接口
 
 因为项目已经有任务记录、调度器和 worker，再缺这层平台接口，就还是半个平台。
 

@@ -8,12 +8,12 @@
 
 ## 今天结束前，你必须拿到什么
 
-- `routers/task_router.py` 中的列表 / 取消 / 重试接口方案
+- `routers/task_router.py` 中的列表 / 重试接口方案
 - `crud/task_record_crud.py` 中的过滤、分页、条件更新能力
 - `schemas/task_observability_schema.py`
 - `utils/task_control_service.py`
 - `utils/metrics.py`
-- 一套你能自己复述的 `submit -> observe -> query -> cancel/retry -> diagnose` 理解框架
+- 一套你能自己复述的 `submit -> observe -> query -> retry -> diagnose` 理解框架
 
 ---
 
@@ -29,7 +29,7 @@
 submit task
 -> list / query task
 -> inspect status and quality flags
--> cancel or retry if allowed
+-> retry if allowed
 -> inspect logs and metrics
 -> diagnose queue / search / llm / export issues
 ```
@@ -51,7 +51,6 @@ submit task
 但对于一个任务系统来说，它仍然不够像平台：
 
 - 没有任务列表
-- 没有取消
 - 没有重试
 - 查询信息层次不够清楚
 - 日志与指标还不成体系
@@ -69,11 +68,9 @@ flowchart TD
     A[client] --> B[POST /tasks/search]
     A --> C[GET /tasks]
     A --> D[GET /tasks/{task_id}]
-    A --> E[POST /tasks/{task_id}/cancel]
     A --> F[POST /tasks/{task_id}/retry]
     C --> G[crud/task_record_crud.py]
     D --> G
-    E --> H[utils/task_control_service.py]
     F --> H
     H --> G
     G --> I[models/task_record.py]
@@ -95,13 +92,12 @@ flowchart TD
 白话理解：
 
 - 用户不只是提交任务
-- 用户还需要看、筛、控、重试
+- 用户还需要看、筛、重试
 
 #### 第 2 层：任务控制层
 
 这一层负责：
 
-- 决定哪些状态允许取消
 - 决定哪些状态允许重试
 - 决定查询返回多少信息
 
@@ -151,11 +147,10 @@ flowchart TD
 - 阶段耗时有数据
 - 有最小指标容器
 
-## 第 3 层：Day 4 不是所有状态都能任意取消和重试
+## 第 3 层：Day 4 不是所有状态都能任意重试
 
 今天你要非常明确：
 
-- `queued / running / retrying` 才适合取消
 - `failed / timeout / partial_success` 更适合重试
 
 状态控制不是“接口存在就能调”。
@@ -182,14 +177,14 @@ flowchart TD
 submit
 -> list
 -> inspect
--> cancel / retry
+-> retry
 -> observe
 -> diagnose
 ```
 
 你今天必须能回答这两个问题：
 
-1. 为什么 `409 Conflict` 很适合表达“状态不允许取消或重试”？
+1. 为什么 `409 Conflict` 很适合表达“状态不允许重试”？
 2. 为什么查询接口要有 preview / detail / debug 分层？
 
 ## 09:50 - 10:40：先决定 Day 4 最小接口集合
@@ -198,7 +193,6 @@ submit
 
 - `GET /api/v1/tasks`
 - `GET /api/v1/tasks/{task_id}`
-- `POST /api/v1/tasks/{task_id}/cancel`
 - `POST /api/v1/tasks/{task_id}/retry`
 
 这里最重要的是：
@@ -238,7 +232,7 @@ Day 4 的最小验收目标：
 
 ## 14:00 - 14:40：先改 `crud/task_record_crud.py`
 
-今天建议你先把持久化能力补齐，因为列表、取消、重试都会依赖它。
+今天建议你先把持久化能力补齐，因为列表、重试都会依赖它。
 
 ### `crud/task_record_crud.py` 练手骨架版
 
@@ -324,18 +318,11 @@ async def list_task_records(
 
 ## 14:40 - 15:30：新增 `utils/task_control_service.py`
 
-今天很建议你把取消和重试的状态判断收口。
+今天很建议你把重试的状态判断收口。
 
 ### `utils/task_control_service.py` 练手骨架版
 
 ```python
-def can_cancel(status: str) -> bool:
-    # 你要做的事：
-    # 1. queued / running / retrying 可以取消
-    # 2. 其他状态不允许取消
-    raise NotImplementedError
-
-
 def can_retry(status: str) -> bool:
     # 你要做的事：
     # 1. failed / timeout / partial_success 可以重试
@@ -346,10 +333,6 @@ def can_retry(status: str) -> bool:
 ### `utils/task_control_service.py` 参考答案
 
 ```python
-def can_cancel(status: str) -> bool:
-    return status in {"queued", "running", "retrying"}
-
-
 def can_retry(status: str) -> bool:
     return status in {"failed", "timeout", "partial_success"}
 ```
@@ -361,7 +344,6 @@ def can_retry(status: str) -> bool:
 至少建议新增：
 
 - `GET /tasks`
-- `POST /tasks/{task_id}/cancel`
 - `POST /tasks/{task_id}/retry`
 
 同时建议 `GET /tasks/{task_id}` 支持：
@@ -502,7 +484,7 @@ def record_stage_latency(
 今天很建议你顺手把这些补进 README：
 
 - 新状态机说明
-- 取消与重试语义
+- 重试语义
 - 本地怎么启动 API / worker / Redis
 - 查询接口怎么区分 preview / detail / debug
 
@@ -514,7 +496,7 @@ def record_stage_latency(
 
 1. 为什么任务系统不能只有提交和详情接口？
 2. 为什么 `409 Conflict` 很适合状态不合法的控制接口？
-3. 哪些状态允许取消，哪些允许重试？
+3. 哪些状态允许重试？
 4. 为什么详情查询要开始支持字段裁剪？
 5. 为什么日志要围绕 `task_id` 串联？
 6. 为什么指标最开始只要做到“足够排障”就可以？
@@ -526,7 +508,7 @@ def record_stage_latency(
 ## 今日验收标准
 
 - 已有任务列表能力
-- 已有取消与重试的合法性规则
+- 已有重试合法性规则
 - 详情查询开始支持分层返回
 - 日志字段开始统一
 - 阶段耗时开始有最小记录
@@ -544,7 +526,7 @@ def record_stage_latency(
 
 规避建议：
 
-- 把取消和重试判定收口到控制服务
+- 把重试判定收口到控制服务
 
 ### 坑 2：详情接口越来越大，什么都往里塞
 

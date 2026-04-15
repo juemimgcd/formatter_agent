@@ -14,7 +14,7 @@ from schemas.search_schema import SearchRequest
 from schemas.task_schema import TaskItem, TaskStatus
 from utils.response import success_response
 from utils.task_dispatcher import dispatch_task
-from utils.task_control_service import can_cancel, can_retry
+from utils.task_control_service import can_retry
 from utils.task_presenter import build_task_item_from_record
 from utils.task_service import create_pending_task
 
@@ -90,34 +90,6 @@ async def get_task_detail(task_id: str, db: AsyncSession = Depends(get_db)):
             status_code=status.HTTP_404_NOT_FOUND, detail="tasks not found"
         )
     return success_response(data=build_task_item_from_record(record))
-
-
-@router.post("/{task_id}/cancel")
-async def cancel_task(task_id: str, db: AsyncSession = Depends(get_db)):
-    record = await get_task_record_by_task_id(db, task_id=task_id)
-    if not record:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND, detail="tasks not found"
-        )
-
-    if not can_cancel(getattr(record, "status", "")):
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail="当前任务状态不允许取消",
-        )
-
-    updated = await update_task_record_status(db, task_id, TaskStatus.CANCELLED)
-    if db is not None:
-        await db.commit()
-
-    task_item = build_task_item_from_record(updated or record).model_copy(
-        update={
-            "status": TaskStatus.CANCELLED,
-            "message": "任务已取消",
-            "warnings": ["当前取消通过任务状态检查点生效，尚未向 Celery worker 发送强制 revoke 指令。"],
-        }
-    )
-    return success_response(data=task_item)
 
 
 @router.post("/{task_id}/retry")

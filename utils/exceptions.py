@@ -35,6 +35,7 @@ class AppError(Exception):
             data: 额外上下文（需可 JSON 序列化）。
             cause: 原始异常（用于内部追踪）。
         """
+        # 初始化项目业务异常的标准字段，便于接口层统一处理。
         self.message = (message or "").strip() or "业务异常"
         self.code = (code or self.default_code).strip() or self.default_code
         self.status_code = (
@@ -50,6 +51,7 @@ class AppError(Exception):
         默认返回 {"code": ..., "details": ...} 结构；若无额外信息则返回 None。
         """
 
+        # 将异常对象转换成统一响应中可序列化的错误数据。
         payload: dict[str, Any] = {"code": self.code}
         if self.data is not None:
             payload["details"] = self.data

@@ -53,7 +53,6 @@ def build_task_item_from_record(record: TaskRecord) -> TaskItem:
             TaskStatus.QUEUED: "任务已排队",
             TaskStatus.RUNNING: "任务执行中",
             TaskStatus.RETRYING: "任务重试中",
-            TaskStatus.CANCELLED: "任务已取消",
             TaskStatus.TIMEOUT: "任务执行超时",
             TaskStatus.PARTIAL_SUCCESS: "任务部分完成",
             TaskStatus.EMPTY_RESULT: "未找到可用结果",

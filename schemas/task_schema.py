@@ -15,7 +15,6 @@ class TaskStatus(StrEnum):
     SUCCESS = "success"
     FAILED = "failed"
     TIMEOUT = "timeout"
-    CANCELLED = "cancelled"
     RETRYING = "retrying"
     EMPTY_RESULT = "empty_result"
 

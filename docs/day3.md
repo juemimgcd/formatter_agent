@@ -595,7 +595,7 @@ def normalize_structured_item(query: str, item: StructuredResultItem) -> Structu
 明天你会进入平台接口和可观测性层：
 
 - 任务列表怎么查
-- 取消与重试怎么做
+- 重试怎么做
 - 查询怎么裁剪字段
 - 日志和指标怎么收口
 

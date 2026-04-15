@@ -24,16 +24,6 @@ def _search_result(
     )
 
 
-@pytest.fixture(autouse=True)
-def stub_task_record_lookup(monkeypatch):
-    async def fake_get_task_record_by_task_id(db_session, task_id):
-        return None
-
-    monkeypatch.setattr(
-        task_service, "get_task_record_by_task_id", fake_get_task_record_by_task_id
-    )
-
-
 @pytest.mark.asyncio
 async def test_create_pending_task_trims_query_before_persist(monkeypatch):
     db = AsyncMock()
@@ -124,6 +114,41 @@ async def test_run_search_task_returns_timeout_message_when_search_fails(monkeyp
     assert result.total_items == 0
     assert result.preview_items == []
     assert result.message == "联网搜索超时或上游搜索失败，当前未能获取结果"
+
+
+@pytest.mark.asyncio
+async def test_run_search_task_marks_failed_when_intent_stage_raises(monkeypatch):
+    db = AsyncMock()
+
+    recorded_statuses: list[TaskStatus] = []
+
+    async def fake_update_task_record_status(
+        db_session, task_id, status, extra_data=None
+    ):
+        recorded_statuses.append(status)
+        return None
+
+    def fake_parse_search_intent(query):
+        raise RuntimeError("intent parse failed")
+
+    monkeypatch.setattr(
+        task_service, "update_task_record_status", fake_update_task_record_status
+    )
+    monkeypatch.setattr(task_service, "parse_search_intent", fake_parse_search_intent)
+
+    result = await task_service.run_search_task(
+        task_id="task-intent-error-001",
+        request=SearchRequest(query="AI 产品经理", max_results=5),
+        db=db,
+    )
+
+    assert recorded_statuses == [
+        TaskStatus.RUNNING,
+        TaskStatus.FAILED,
+    ]
+    assert result.status == TaskStatus.FAILED
+    assert result.error is not None
+    assert "intent parse failed" in result.error
 
 
 @pytest.mark.asyncio
@@ -392,45 +417,3 @@ async def test_run_search_task_keeps_structured_results_order_and_duplicates(
         "第一条重复结果",
         "第二条重复结果",
     ]
-
-
-@pytest.mark.asyncio
-async def test_run_search_task_returns_cancelled_when_marked_cancelled_before_failure(
-    monkeypatch,
-):
-    db = AsyncMock()
-    status_updates: list[TaskStatus] = []
-
-    async def fake_update_task_record_status(
-        db_session, task_id, status, extra_data=None
-    ):
-        status_updates.append(status)
-        return None
-
-    async def fake_search_web(query, *, max_results):
-        raise TimeoutError("search timeout")
-
-    async def fake_get_task_record_by_task_id(db_session, task_id):
-        return type(
-            "Record",
-            (),
-            {"status": TaskStatus.CANCELLED, "task_id": task_id, "query": "AI 产品经理"},
-        )()
-
-    monkeypatch.setattr(
-        task_service, "update_task_record_status", fake_update_task_record_status
-    )
-    monkeypatch.setattr(task_service, "search_web", fake_search_web)
-    monkeypatch.setattr(
-        task_service, "get_task_record_by_task_id", fake_get_task_record_by_task_id
-    )
-
-    result = await task_service.run_search_task(
-        task_id="task-cancelled-001",
-        request=SearchRequest(query="AI 产品经理", max_results=5),
-        db=db,
-    )
-
-    assert status_updates == [TaskStatus.RUNNING]
-    assert result.status == TaskStatus.CANCELLED
-    assert result.message == "任务已取消"

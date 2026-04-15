@@ -1,14 +1,41 @@
 # rebuild_agent
 
-一个基于 FastAPI 的结构化联网搜索服务。用户提交自然语言查询后，API 负责创建任务并入队，Celery worker 负责执行搜索、结构化整理和 Excel 导出，最终通过任务接口查询状态与结果。
+一个通用的 `Natural Language Query -> Structured Data Output` 系统。用户提交开放领域自然语言查询后，API 负责创建任务并入队，Celery worker 负责完成意图解析、Schema 解析、搜索、结构化整理、质量标注和 Excel 导出，最终通过任务接口查询状态与结构化结果。
 
 ## 当前状态
 
 - 任务受理链路已经切到 `create -> queued -> worker -> running -> success/failed`
+- 查询进入执行链路前会先解析为通用查询形态 intent：`general / lookup / collection / comparison`
+- 当前默认使用 `generic_search_result` 输出 schema，后续可以扩展为更多查询形态 schema
+- 执行侧已加入轻量 planner，用于显式表达 `search -> rank -> structure -> export` 的计划
 - 搜索结果经过统一清洗、top-k 选择、候选映射后再进入结构化阶段
 - 结构化阶段已恢复真实 `prompt + llm + parser` 实现
 - 结构化失败或返回空结果时，会回退到候选结果生成 fallback 输出
-- `pytest` 当前通过：`26 passed`
+- 最终任务对象会返回 `used_fallback / result_quality / warnings` 这类轻量质量标注
+- `pytest` 当前通过：`34 passed`
+
+## System Design Philosophy
+
+本项目不是某个垂直场景 Agent，而是一个通用结构化数据生成 pipeline：
+
+```text
+Natural Language Query
+-> Intent Parser
+-> Schema Resolver
+-> Planner
+-> Search / Rank / Structure / Export
+-> Task Memory
+-> Result Quality Check
+-> Structured Data Output
+```
+
+设计原则：
+
+- 领域无关：具体业务查询只是使用场景，不是系统边界。
+- Schema 可扩展：当前只有默认 `generic_search_result`，但 schema 解析层已经独立。
+- Workflow-first：保留稳定工程链路，不引入复杂多轮 Agent runtime。
+- 轻量 Agent-like：用 Intent、Schema、Planner、Task Memory 表达可解释执行过程。
+- 不做独立自我评估模块：只做 `result_quality` 标注，不触发自动重试或自我修复循环。
 
 ## 技术栈
 
@@ -23,10 +50,11 @@
 
 ## 核心流程
 
-可以把这条链路分成 3 段来看：
+可以把这条链路分成 4 段来看：
 
 - 提交任务：用户发起自然语言问题，API 创建任务并投递到 Celery
-- 执行任务：worker 完成联网搜索、结果清洗、候选构造、LLM 结构化整理、fallback 与 Excel 导出
+- 任务理解：worker 解析 intent、解析输出 schema，并构造轻量执行计划
+- 执行任务：worker 完成联网搜索、结果清洗、候选构造、LLM 结构化整理、fallback、质量标注与 Excel 导出
 - 查询结果：前端或调用方通过任务详情接口轮询最终结构化结果、预览结果和导出文件路径
 
 ```text
@@ -39,18 +67,22 @@
 
 Celery worker 消费任务
 -> status=running
+-> parse_search_intent 解析查询形态
+-> resolve_output_schema 解析输出 schema
+-> build_execution_plan 构造 search/rank/structure/export 计划
 -> search_web 联网搜索
 -> build_candidates 映射为候选结果
 -> select_top_candidates 去重 + 简单相关性重排 + top-k
 -> build_rebuild_prompt_input 重建结构化提示词输入
 -> build_structured_results 调用 prompt + llm + parser
 -> 若结构化失败或为空则 fallback 到候选结果
+-> evaluate_result_quality 标注 high/fallback/low
 -> export_results_to_excel 导出 Excel
 -> 写回 task_records(status/result_payload/excel_path/error_message)
 
 客户端轮询 GET /api/v1/tasks/{task_id}
 -> task_presenter 把记录转换为 TaskItem
--> 返回 preview_items / result_items / excel_path / status / error
+-> 返回 preview_items / result_items / excel_path / status / error / result_quality / warnings
 ```
 
 ```mermaid
@@ -72,6 +104,9 @@ flowchart TD
     WORKER[Celery worker<br/>tasks.run_search_task]
     RUNNER[execute_task_from_payload]
     RUNNING[更新任务状态为 running]
+    INTENT[parse_search_intent<br/>general / lookup / collection / comparison]
+    SCHEMA[resolve_output_schema<br/>generic_search_result]
+    PLAN[build_execution_plan<br/>search / rank / structure / export]
     SEARCH[search_web]
     PROVIDER{搜索 provider}
     DDG[DuckDuckGo HTML]
@@ -84,6 +119,7 @@ flowchart TD
     CHECK{结构化结果是否成功且非空}
     STRUCT[StructuredResultItem 列表<br/>query / title / source / url / summary / quality_score]
     FALLBACK[build_fallback_structured_items<br/>用候选结果生成保底结构化输出]
+    QUALITY[evaluate_result_quality<br/>high / fallback / low]
     EXPORT{是否有最终结果}
     EXCEL[export_results_to_excel<br/>生成 .xlsx 文件]
     DB_SUCCESS[(写回 task_records<br/>status=success<br/>result_payload + excel_path)]
@@ -101,13 +137,13 @@ flowchart TD
   API --> VALIDATE --> CREATE --> DB_CREATED --> DISPATCH --> REDIS
   DISPATCH --> QUEUED --> ACCEPT
 
-  REDIS --> WORKER --> RUNNER --> RUNNING --> SEARCH --> PROVIDER
+  REDIS --> WORKER --> RUNNER --> RUNNING --> INTENT --> SCHEMA --> PLAN --> SEARCH --> PROVIDER
   PROVIDER --> DDG --> RAW
   PROVIDER --> SOGOU --> RAW
   DDG -. 异常或空结果时兜底 .-> SOGOU
   RAW --> CAND --> RERANK --> REBUILD --> LLM --> CHECK
-  CHECK -->|成功| STRUCT --> EXPORT
-  CHECK -->|失败或空结果| FALLBACK --> EXPORT
+  CHECK -->|成功| STRUCT --> QUALITY --> EXPORT
+  CHECK -->|失败或空结果| FALLBACK --> QUALITY --> EXPORT
   EXPORT -->|有结果| EXCEL --> DB_SUCCESS
   EXPORT -->|无结果| DB_SUCCESS
   SEARCH -. 搜索异常 .-> DB_FAILED
@@ -127,13 +163,18 @@ flowchart TD
 - `tasks.py`：Celery task 注册入口
 - `utils/task_dispatcher.py`：任务入队与 dispatch 元数据封装
 - `utils/task_runner.py`：worker 侧执行入口
-- `utils/task_service.py`：搜索、结构化、导出和状态更新主编排
-- `utils/task_service_helpers.py`：文本清洗、top-k、候选映射、fallback、结果拼装
+- `utils/task_service.py`：intent、schema、plan、搜索、结构化、导出和状态更新主编排
+- `utils/task_service_helpers.py`：文本清洗、top-k、候选映射、fallback、结果拼装、质量标注
+- `utils/intent_parser.py`：把自然语言 query 解析为通用查询形态
+- `utils/schema_registry.py`：解析当前任务使用的输出 schema
+- `utils/planner.py`：生成轻量执行计划，保留工具语义但不引入动态 tool registry
 - `utils/search_client.py`：联网搜索 provider
 - `utils/retriever.py`：二阶段结构化输入重建
 - `utils/structured_result_builder.py`：LLM 结构化抽取
 - `utils/task_presenter.py`：数据库记录转接口模型
 - `schemas/search_schema.py`：搜索请求、搜索结果、候选结果、结构化结果
+- `schemas/intent_schema.py`：查询意图模型
+- `schemas/agent_schema.py`：执行计划、输出 schema、任务记忆等轻量边界模型
 - `schemas/task_schema.py`：任务状态和任务接口返回模型
 - `schemas/task_dispatch_schema.py`：dispatcher 边界模型
 
@@ -167,7 +208,11 @@ flowchart TD
     "preview_items": [],
     "result_items": [],
     "message": "任务已排队",
-    "error": null
+    "error": null,
+    "attempt_count": 0,
+    "used_fallback": false,
+    "result_quality": "unknown",
+    "warnings": []
   }
 }
 ```
@@ -183,6 +228,16 @@ flowchart TD
 - `result_items`
 - `excel_path`
 - `error`
+- `used_fallback`
+- `result_quality`
+- `warnings`
+
+`result_quality` 是轻量质量标注，不等同于事实核查：
+
+- `high`：结构化结果存在，且质量分、URL 等基础字段正常
+- `fallback`：结构化阶段失败或为空，结果来自候选搜索结果保底生成
+- `low`：结果为空、平均质量分过低或存在明显结构问题
+- `unknown`：任务尚未完成或历史记录未写入质量信息
 
 ### 任务列表
 
@@ -225,21 +280,6 @@ flowchart TD
   }
 }
 ```
-
-### 取消任务
-
-`POST /api/v1/tasks/{task_id}/cancel`
-
-当前仅允许这些状态取消：
-
-- `queued`
-- `running`
-- `retrying`
-
-说明：
-
-- 当前取消通过任务状态检查点生效，worker 会在后续阶段检查到 `cancelled` 后停止继续写回成功或失败结果
-- 当前尚未向 Celery worker 发送强制 `revoke` 指令，因此不是硬中断
 
 ### 重试任务
 
@@ -376,20 +416,20 @@ uv run pytest
 - 请求参数校验与全局异常处理
 - 搜索结果解析
 - 任务编排成功/失败/降级路径
+- intent / planner / result quality 轻量组件
 - Excel 导出
 
-## 已知限制
+当前结果：
 
-- 搜索仍以 HTML 解析为主，稳定性弱于商业搜索 API
-- 结构化输入仍主要来自标题与 snippet，尚未接入正文抓取
-- 取消任务当前依赖任务执行过程中的状态检查点，尚未接入 Celery revoke 等硬中断机制
-- `TaskStatus` 中已预留 `partial_success / timeout / retrying / cancelled`，但当前主链路还未完全用起来
-- 阶段时间戳 schema 已存在，但主链路尚未完整持久化这些时间字段
+```text
+34 passed
+```
 
-## 后续方向
+## Design Trade-offs
 
-- 补全任务列表、取消、重试接口
-- 把阶段时间戳和 `attempt_count / used_fallback / result_quality` 真正落库
-- 引入更稳定的搜索 provider 或做多源 aggregation
-- 增加正文抓取、字段来源追踪和质量分级
-- 接入指标、队列监控和告警
+- HTML 搜索 provider：成本低、便于本地 demo，但稳定性弱于商业搜索 API。
+- `top-k=5`：在召回、LLM token 成本、延迟和结构化稳定性之间取平衡。
+- snippet-based extraction：保持链路轻量，但牺牲网页正文级信息密度。
+- generic schema first：先证明 schema 层存在，不急于过早堆多套场景 schema。
+- no separate tool registry：工具名直接放在 `PlanStep.tool_name`，保留可解释性，同时减少运行时代码。
+- no self-evaluation module：只做结果质量标注，不引入不可控的多轮自我修复。
