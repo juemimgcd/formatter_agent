@@ -10,6 +10,7 @@ def parse_task_status(value: str) -> TaskStatus:
 
     解析失败时返回 `TaskStatus.FAILED`，避免接口层因为脏数据崩溃。
     """
+    # 将持久化状态值安全转换为对外使用的任务状态枚举。
     try:
         return TaskStatus(value)
     except Exception:
@@ -20,6 +21,7 @@ def build_structured_items_from_payload(
     payload: list[dict] | None,
 ) -> list[StructuredResultItem]:
     """将持久化的 result_payload（list[dict]）反序列化为结构化结果对象列表。"""
+    # 把数据库中的结果载荷恢复为结构化结果对象列表。
     if not payload:
         return []
 
@@ -39,6 +41,7 @@ def build_task_item_from_record(record: TaskRecord) -> TaskItem:
     - 恢复结构化结果列表
     - 生成 preview_items 与 message
     """
+    # 将任务记录模型整理成接口响应需要的任务对象。
     status = parse_task_status(getattr(record, "status", ""))
     result_items = build_structured_items_from_payload(record.result_payload)
     total_items = int(record.result_count or 0)
@@ -49,6 +52,11 @@ def build_task_item_from_record(record: TaskRecord) -> TaskItem:
             TaskStatus.CREATED: "任务已创建",
             TaskStatus.QUEUED: "任务已排队",
             TaskStatus.RUNNING: "任务执行中",
+            TaskStatus.RETRYING: "任务重试中",
+            TaskStatus.CANCELLED: "任务已取消",
+            TaskStatus.TIMEOUT: "任务执行超时",
+            TaskStatus.PARTIAL_SUCCESS: "任务部分完成",
+            TaskStatus.EMPTY_RESULT: "未找到可用结果",
             TaskStatus.FAILED: "任务失败",
         }.get(status, "ok")
 

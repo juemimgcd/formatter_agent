@@ -14,7 +14,7 @@ def success_response(
     background: BackgroundTask | BackgroundTasks | None = None,
 ) -> JSONResponse:
     """返回统一的成功响应。"""
-
+    # 按统一响应格式构造成功场景的 JSON 返回值。
     payload = ApiResponse(success=True, message=message, data=data)
     return JSONResponse(
         content=jsonable_encoder(payload),
@@ -27,6 +27,6 @@ def error_response(
     message: str = "error", data: Any = None, status_code: int = 400
 ) -> JSONResponse:
     """返回统一的失败响应。"""
-
+    # 按统一响应格式构造失败场景的 JSON 返回值。
     payload = ApiResponse(success=False, message=message, data=data)
     return JSONResponse(content=jsonable_encoder(payload), status_code=status_code)

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import importlib.util
 from datetime import datetime, timezone
 
 from conf.celery_app import celery_app
@@ -16,6 +15,7 @@ QUEUE_BY_STAGE = {
 
 
 def build_enqueue_payload(task_id: str, request: SearchRequest) -> DispatchPayload:
+    # 构造任务投递到异步队列时需要携带的基础元数据。
     return DispatchPayload(
         task_id=task_id,
         query=request.query,
@@ -26,19 +26,14 @@ def build_enqueue_payload(task_id: str, request: SearchRequest) -> DispatchPaylo
 
 
 def get_queue_name(stage: str) -> str:
+    # 根据处理阶段返回对应的 Celery 队列名。
     return QUEUE_BY_STAGE.get(stage, "search_queue")
 
 
-def ensure_broker_dependencies() -> None:
-    broker_url = str(celery_app.conf.broker_url or "")
-    if broker_url.startswith("redis://") and importlib.util.find_spec("redis") is None:
-        raise WorkflowError(
-            "Celery Redis 依赖未安装，请先执行 `uv sync` 或安装 `redis` 包",
-            status_code=503,
-        )
 
 
 async def dispatch_task(task_id: str, request: SearchRequest) -> DispatchResult:
+    # 对外暴露统一的任务派发入口。
     return await dispatch_search_task(task_id, request)
 
 
@@ -46,7 +41,7 @@ async def dispatch_search_task(
     task_id: str,
     request: SearchRequest,
 ) -> DispatchResult:
-    ensure_broker_dependencies()
+    # 将搜索任务发送到 Celery 并返回派发结果摘要。
     enqueue_payload = build_enqueue_payload(task_id, request)
     queue_name = get_queue_name("search")
     try:

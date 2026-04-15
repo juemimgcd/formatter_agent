@@ -5,7 +5,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from conf.logging_conf import app_logger
 from conf.settings import settings
-from crud import create_task_record, update_task_record_status
+from crud import (
+    create_task_record,
+    get_task_record_by_task_id,
+    update_task_record_status,
+)
 from schemas.search_schema import CandidateResultItem, SearchRequest, StructuredResultItem
 from schemas.task_schema import TaskItem, TaskStatus
 from utils.excel_service import export_results_to_excel
@@ -18,20 +22,8 @@ from utils.task_service_helpers import (
     build_result_payload,
     build_task_item,
     clean_text,
-    select_top_k_results,
+    select_top_candidates,
 )
-from datetime import datetime, timezone
-from schemas.task_runtime_schema import StageTimestampPatch
-
-
-def build_stage_update(stage: str) -> StageTimestampPatch:
-    now = datetime.now(timezone.utc)
-    mapping = {
-        "search": StageTimestampPatch(search_finished_at=now),
-        "llm": StageTimestampPatch(llm_finished_at=now),
-        "export": StageTimestampPatch(export_finished_at=now),
-    }
-    return mapping.get(stage, StageTimestampPatch())
 
 
 logger = app_logger.bind(module="task_service")
@@ -43,7 +35,36 @@ REBUILD_SUMMARY_CHAR_LIMIT = 120
 
 def build_task_id() -> str:
     """生成用于任务查询和日志追踪的短 task_id。"""
+    # 生成一个便于查询和追踪的短任务编号。
     return uuid.uuid4().hex[:8]
+
+
+async def is_task_cancelled(task_id: str, db: AsyncSession) -> bool:
+    # 查询任务当前状态是否已经被标记为取消。
+    record = await get_task_record_by_task_id(db, task_id)
+    if not record:
+        return False
+    return str(getattr(record, "status", "")) == str(TaskStatus.CANCELLED)
+
+
+async def safe_is_task_cancelled(task_id: str, db: AsyncSession) -> bool:
+    # 在非数据库异常路径里安全检查取消状态，避免异常处理再次打坏同一个 session。
+    try:
+        return await is_task_cancelled(task_id, db)
+    except Exception as exc:
+        logger.warning("task={} stage=cancel_check_failed reason={}", task_id, exc)
+        return False
+
+
+def build_cancelled_task_item(task_id: str, query: str) -> TaskItem:
+    # 构造任务已取消时返回给调用方的统一对象。
+    return build_task_item(
+        task_id=task_id,
+        query=query,
+        status=TaskStatus.CANCELLED,
+        message="任务已取消",
+        preview_limit=PREVIEW_ITEM_LIMIT,
+    )
 
 
 async def extract_structured_results(
@@ -55,6 +76,7 @@ async def extract_structured_results(
     max_results: int,
 ) -> list[StructuredResultItem]:
     """执行结构化抽取并在失败时回退到候选结果。"""
+    # 调用结构化抽取链路，并在异常或空结果时回退到保底结果。
     if not top_results:
         logger.info("task={} stage=structured_results skipped=no_top_candidates", task_id)
         return []
@@ -97,6 +119,7 @@ async def extract_structured_results(
 
 async def create_pending_task(request: SearchRequest, db: AsyncSession) -> TaskItem:
     """创建 created 任务记录并返回对外任务对象。"""
+    # 创建初始任务记录并返回前端可直接使用的任务信息。
     task_id = build_task_id()
     query = clean_text(request.query)
     await create_task_record(
@@ -123,6 +146,7 @@ async def run_search_task(
     db: AsyncSession,
 ) -> TaskItem:
     """编排搜索、结构化、导出和任务状态更新全流程。"""
+    # 执行任务的搜索、抽取、导出和状态落库全流程。
     query = clean_text(request.query)
     try:
         await update_task_record_status(db, task_id, TaskStatus.RUNNING)
@@ -132,6 +156,8 @@ async def run_search_task(
             search_results = await search_web(query, max_results=fetch_limit)
         except Exception as exc:
             logger.warning("task={} stage=results_exhausted reason={}", task_id, exc)
+            if await safe_is_task_cancelled(task_id, db):
+                return build_cancelled_task_item(task_id, query)
             await update_task_record_status(
                 db,
                 task_id=task_id,
@@ -146,13 +172,25 @@ async def run_search_task(
                 preview_limit=PREVIEW_ITEM_LIMIT,
             )
 
-        candidates = build_candidates(
+        if await safe_is_task_cancelled(task_id, db):
+            return build_cancelled_task_item(task_id, query)
+
+        raw_candidates = build_candidates(
             task_id,
-            query,
-            select_top_k_results(query, search_results, top_k=FIXED_TOP_K),
+            search_results,
             search_provider=settings.search_provider,
         )
-        logger.info("task={} stage=results count={}", task_id, len(candidates))
+        candidates = select_top_candidates(
+            query,
+            raw_candidates,
+            top_k=FIXED_TOP_K,
+        )
+        logger.info(
+            "task={} stage=results raw_count={} selected_count={}",
+            task_id,
+            len(raw_candidates),
+            len(candidates),
+        )
 
         rebuilt_prompt_input_text = ""
         if candidates:
@@ -182,6 +220,9 @@ async def run_search_task(
             task_id,
             len(final_items),
         )
+
+        if await safe_is_task_cancelled(task_id, db):
+            return build_cancelled_task_item(task_id, query)
 
         excel_path = export_results_to_excel(final_items) if final_items else None
         logger.info(

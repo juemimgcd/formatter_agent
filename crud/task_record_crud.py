@@ -1,9 +1,6 @@
-from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import desc, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.sql.elements import ColumnElement
-from models.task_record import TaskRecord
 from models.task_record import TaskRecord
 from schemas.task_schema import TaskStatus
 

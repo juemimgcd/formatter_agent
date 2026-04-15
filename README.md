@@ -23,39 +23,100 @@
 
 ## 核心流程
 
-```text
-POST /api/v1/tasks/search
--> create task record(status=created)
--> dispatch to Celery
--> update status=queued
--> return 202
+可以把这条链路分成 3 段来看：
 
-Celery worker
--> consume tasks.run_search_task
--> update status=running
--> search_web
--> select_top_k_results / build_candidates
--> build_rebuild_prompt_input
--> build_structured_results
--> export_results_to_excel
--> update final status and result payload
+- 提交任务：用户发起自然语言问题，API 创建任务并投递到 Celery
+- 执行任务：worker 完成联网搜索、结果清洗、候选构造、LLM 结构化整理、fallback 与 Excel 导出
+- 查询结果：前端或调用方通过任务详情接口轮询最终结构化结果、预览结果和导出文件路径
+
+```text
+用户输入 query
+-> POST /api/v1/tasks/search
+-> 创建 task_record(status=created)
+-> dispatch_task 投递到 Celery / Redis
+-> 更新 status=queued
+-> 返回 202 + task_id
+
+Celery worker 消费任务
+-> status=running
+-> search_web 联网搜索
+-> build_candidates 映射为候选结果
+-> select_top_candidates 去重 + 简单相关性重排 + top-k
+-> build_rebuild_prompt_input 重建结构化提示词输入
+-> build_structured_results 调用 prompt + llm + parser
+-> 若结构化失败或为空则 fallback 到候选结果
+-> export_results_to_excel 导出 Excel
+-> 写回 task_records(status/result_payload/excel_path/error_message)
+
+客户端轮询 GET /api/v1/tasks/{task_id}
+-> task_presenter 把记录转换为 TaskItem
+-> 返回 preview_items / result_items / excel_path / status / error
 ```
 
 ```mermaid
-flowchart LR
-  U[User] --> API[POST /api/v1/tasks/search]
-  API --> DB1[(task_records: created)]
-  API --> DISP[utils/task_dispatcher.py]
-  DISP --> REDIS[(Redis)]
-  REDIS --> WORKER[tasks.run_search_task]
-  WORKER --> RUNNER[utils/task_runner.py]
-  RUNNER --> ORCH[utils/task_service.py]
-  ORCH --> SEARCH[utils/search_client.py]
-  ORCH --> HELPER[utils/task_service_helpers.py]
-  ORCH --> RETRIEVER[utils/retriever.py]
-  ORCH --> BUILDER[utils/structured_result_builder.py]
-  ORCH --> EXCEL[utils/excel_service.py]
-  ORCH --> DB2[(task_records: queued/running/success/failed)]
+flowchart TD
+  U[用户输入自然语言问题<br/>query + max_results]
+
+  subgraph S1[1. API 提交阶段]
+    API[POST /api/v1/tasks/search]
+    VALIDATE[FastAPI / Pydantic 校验请求体]
+    CREATE[create_pending_task<br/>生成 task_id + 清洗 query]
+    DB_CREATED[(task_records<br/>status=created)]
+    DISPATCH[dispatch_task / dispatch_search_task]
+    REDIS[(Redis / Celery Broker)]
+    QUEUED[更新任务状态为 queued]
+    ACCEPT[返回 202 Accepted<br/>task_id + status=queued]
+  end
+
+  subgraph S2[2. Worker 执行阶段]
+    WORKER[Celery worker<br/>tasks.run_search_task]
+    RUNNER[execute_task_from_payload]
+    RUNNING[更新任务状态为 running]
+    SEARCH[search_web]
+    PROVIDER{搜索 provider}
+    DDG[DuckDuckGo HTML]
+    SOGOU[搜狗 HTML]
+    RAW[原始搜索结果<br/>title / url / snippet / rank]
+    CAND[build_candidates<br/>转换为 CandidateResultItem]
+    RERANK[select_top_candidates<br/>按 query 去重 + 简单相关性重排 + top-k]
+    REBUILD[build_rebuild_prompt_input<br/>构造二阶段 JSON 提示输入]
+    LLM[build_structured_results<br/>prompt + llm + pydantic parser]
+    CHECK{结构化结果是否成功且非空}
+    STRUCT[StructuredResultItem 列表<br/>query / title / source / url / summary / quality_score]
+    FALLBACK[build_fallback_structured_items<br/>用候选结果生成保底结构化输出]
+    EXPORT{是否有最终结果}
+    EXCEL[export_results_to_excel<br/>生成 .xlsx 文件]
+    DB_SUCCESS[(写回 task_records<br/>status=success<br/>result_payload + excel_path)]
+    DB_FAILED[(写回 task_records<br/>status=failed<br/>error_message)]
+  end
+
+  subgraph S3[3. 结果查询阶段]
+    DETAIL[GET /api/v1/tasks/task_id]
+    LOAD[读取 task_records]
+    PRESENT[build_task_item_from_record]
+    RESPONSE[返回 TaskItem<br/>status / preview_items / result_items / excel_path / error]
+  end
+
+  U --> API
+  API --> VALIDATE --> CREATE --> DB_CREATED --> DISPATCH --> REDIS
+  DISPATCH --> QUEUED --> ACCEPT
+
+  REDIS --> WORKER --> RUNNER --> RUNNING --> SEARCH --> PROVIDER
+  PROVIDER --> DDG --> RAW
+  PROVIDER --> SOGOU --> RAW
+  DDG -. 异常或空结果时兜底 .-> SOGOU
+  RAW --> CAND --> RERANK --> REBUILD --> LLM --> CHECK
+  CHECK -->|成功| STRUCT --> EXPORT
+  CHECK -->|失败或空结果| FALLBACK --> EXPORT
+  EXPORT -->|有结果| EXCEL --> DB_SUCCESS
+  EXPORT -->|无结果| DB_SUCCESS
+  SEARCH -. 搜索异常 .-> DB_FAILED
+  LLM -. 未捕获异常 .-> DB_FAILED
+
+  U --> DETAIL
+  DETAIL --> LOAD --> PRESENT --> RESPONSE
+  LOAD -. 读取最终状态与结果载荷 .-> DB_SUCCESS
+  LOAD -. 读取失败信息 .-> DB_FAILED
 ```
 
 ## 主要模块
@@ -122,6 +183,78 @@ flowchart LR
 - `result_items`
 - `excel_path`
 - `error`
+
+### 任务列表
+
+`GET /api/v1/tasks`
+
+支持查询参数：
+
+- `status`：按任务状态过滤
+- `query`：按任务 query / task_id 模糊过滤
+- `limit`：分页大小，默认 `20`
+- `offset`：分页偏移，默认 `0`
+
+返回结构示例：
+
+```json
+{
+  "success": true,
+  "message": "success",
+  "data": {
+    "items": [
+      {
+        "task_id": "a1b2c3d4",
+        "query": "AI 产品经理",
+        "status": "success",
+        "total_items": 5,
+        "excel_path": "E:/python_files/rebuild_agent/outputs/structured_search_result_AI_产品经理_20260415_094851.xlsx",
+        "preview_items": [],
+        "result_items": [],
+        "message": "任务执行完成",
+        "error": null,
+        "attempt_count": 0,
+        "used_fallback": false,
+        "result_quality": "unknown",
+        "warnings": []
+      }
+    ],
+    "count": 1,
+    "limit": 20,
+    "offset": 0
+  }
+}
+```
+
+### 取消任务
+
+`POST /api/v1/tasks/{task_id}/cancel`
+
+当前仅允许这些状态取消：
+
+- `queued`
+- `running`
+- `retrying`
+
+说明：
+
+- 当前取消通过任务状态检查点生效，worker 会在后续阶段检查到 `cancelled` 后停止继续写回成功或失败结果
+- 当前尚未向 Celery worker 发送强制 `revoke` 指令，因此不是硬中断
+
+### 重试任务
+
+`POST /api/v1/tasks/{task_id}/retry?max_results=5`
+
+当前仅允许这些状态重试：
+
+- `failed`
+- `timeout`
+- `partial_success`
+
+说明：
+
+- 重试会清空旧的 `result_payload / excel_path / error_message`，并将任务重新派发到队列
+- 由于当前数据库尚未持久化原始 `max_results`，重试接口要求显式传入或接受默认值
 
 ## 目录结构
 
@@ -249,8 +382,8 @@ uv run pytest
 
 - 搜索仍以 HTML 解析为主，稳定性弱于商业搜索 API
 - 结构化输入仍主要来自标题与 snippet，尚未接入正文抓取
+- 取消任务当前依赖任务执行过程中的状态检查点，尚未接入 Celery revoke 等硬中断机制
 - `TaskStatus` 中已预留 `partial_success / timeout / retrying / cancelled`，但当前主链路还未完全用起来
-- 暂未提供任务列表、取消、重试接口
 - 阶段时间戳 schema 已存在，但主链路尚未完整持久化这些时间字段
 
 ## 后续方向

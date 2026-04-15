@@ -164,6 +164,213 @@ def test_get_task_detail_returns_404_when_missing(client, monkeypatch):
     assert response.json()["detail"] == "tasks not found"
 
 
+def test_list_tasks_returns_wrapped_items_with_pagination(client, monkeypatch):
+    async def fake_list_task_records(db, *, status=None, query=None, limit=20, offset=0):
+        assert db is None
+        assert status == TaskStatus.SUCCESS
+        assert query == "AI"
+        assert limit == 10
+        assert offset == 5
+        item = StructuredResultItem(
+            query="AI 产品经理",
+            title="岗位画像",
+            source="docs",
+            url="https://example.com/pm",
+            summary="包含职责和技能要求。",
+            quality_score=86,
+        )
+        return [
+            TaskRecord(
+                task_id="task-101",
+                query="AI 产品经理",
+                status=TaskStatus.SUCCESS.value,
+                result_count=1,
+                excel_path=None,
+                result_payload=[item.model_dump(mode="json")],
+                error_message=None,
+            )
+        ]
+
+    monkeypatch.setattr(task_router_module, "list_task_records", fake_list_task_records)
+
+    response = client.get("/api/v1/tasks?status=success&query=AI&limit=10&offset=5")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["success"] is True
+    assert payload["data"]["count"] == 1
+    assert payload["data"]["limit"] == 10
+    assert payload["data"]["offset"] == 5
+    assert payload["data"]["items"][0]["task_id"] == "task-101"
+
+
+def test_cancel_task_updates_status_when_allowed(client, monkeypatch):
+    record = TaskRecord(
+        task_id="task-cancel-001",
+        query="AI 产品经理",
+        status=TaskStatus.RUNNING.value,
+        result_count=0,
+        excel_path=None,
+        result_payload=[],
+        error_message=None,
+    )
+
+    async def fake_get_task_record_by_task_id(db, task_id):
+        assert task_id == "task-cancel-001"
+        return record
+
+    async def fake_update_task_record_status(db, task_id, status, extra_data=None):
+        assert task_id == "task-cancel-001"
+        assert status == TaskStatus.CANCELLED
+        return TaskRecord(
+            task_id=task_id,
+            query=record.query,
+            status=TaskStatus.CANCELLED.value,
+            result_count=0,
+            excel_path=None,
+            result_payload=[],
+            error_message=None,
+        )
+
+    monkeypatch.setattr(
+        task_router_module,
+        "get_task_record_by_task_id",
+        fake_get_task_record_by_task_id,
+    )
+    monkeypatch.setattr(
+        task_router_module,
+        "update_task_record_status",
+        fake_update_task_record_status,
+    )
+
+    response = client.post("/api/v1/tasks/task-cancel-001/cancel")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["data"]["status"] == TaskStatus.CANCELLED
+    assert payload["data"]["message"] == "任务已取消"
+
+
+def test_cancel_task_returns_409_when_status_is_not_cancellable(client, monkeypatch):
+    async def fake_get_task_record_by_task_id(db, task_id):
+        return TaskRecord(
+            task_id=task_id,
+            query="AI 产品经理",
+            status=TaskStatus.SUCCESS.value,
+            result_count=1,
+            excel_path=None,
+            result_payload=[],
+            error_message=None,
+        )
+
+    monkeypatch.setattr(
+        task_router_module,
+        "get_task_record_by_task_id",
+        fake_get_task_record_by_task_id,
+    )
+
+    response = client.post("/api/v1/tasks/task-cancel-409/cancel")
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == "当前任务状态不允许取消"
+
+
+def test_retry_task_redispatches_and_resets_payload(client, monkeypatch):
+    dispatched_calls: list[tuple[str, str, int]] = []
+
+    async def fake_get_task_record_by_task_id(db, task_id):
+        return TaskRecord(
+            task_id=task_id,
+            query="AI 产品经理",
+            status=TaskStatus.FAILED.value,
+            result_count=2,
+            excel_path="E:/python_files/rebuild_agent/outputs/old.xlsx",
+            result_payload=[{"title": "old"}],
+            error_message="old error",
+        )
+
+    async def fake_dispatch_task(task_id, request):
+        dispatched_calls.append((task_id, request.query, request.max_results))
+        return DispatchResult(
+            accepted=True,
+            task_id=task_id,
+            dispatch_mode="celery",
+            request_payload=DispatchPayload(
+                task_id=task_id,
+                query=request.query,
+                max_results=request.max_results,
+                submitted_at="2026-04-15T00:00:00+00:00",
+                dispatch_version="v1",
+            ),
+            queue="search_queue",
+            celery_task_id="celery-retry-001",
+        )
+
+    async def fake_update_task_record_status(db, task_id, status, extra_data=None):
+        assert status == TaskStatus.QUEUED
+        assert extra_data == {
+            "result_count": 0,
+            "excel_path": None,
+            "result_payload": [],
+            "error_message": None,
+        }
+        return TaskRecord(
+            task_id=task_id,
+            query="AI 产品经理",
+            status=TaskStatus.QUEUED.value,
+            result_count=0,
+            excel_path=None,
+            result_payload=[],
+            error_message=None,
+        )
+
+    monkeypatch.setattr(
+        task_router_module,
+        "get_task_record_by_task_id",
+        fake_get_task_record_by_task_id,
+    )
+    monkeypatch.setattr(task_router_module, "dispatch_task", fake_dispatch_task)
+    monkeypatch.setattr(
+        task_router_module,
+        "update_task_record_status",
+        fake_update_task_record_status,
+    )
+
+    response = client.post("/api/v1/tasks/task-retry-001/retry?max_results=7")
+
+    assert response.status_code == 202
+    payload = response.json()
+    assert payload["data"]["status"] == TaskStatus.QUEUED
+    assert payload["data"]["total_items"] == 0
+    assert payload["data"]["message"] == "任务已重新排队"
+    assert payload["data"]["result_items"] == []
+    assert dispatched_calls == [("task-retry-001", "AI 产品经理", 7)]
+
+
+def test_retry_task_returns_409_when_status_is_not_retryable(client, monkeypatch):
+    async def fake_get_task_record_by_task_id(db, task_id):
+        return TaskRecord(
+            task_id=task_id,
+            query="AI 产品经理",
+            status=TaskStatus.RUNNING.value,
+            result_count=0,
+            excel_path=None,
+            result_payload=[],
+            error_message=None,
+        )
+
+    monkeypatch.setattr(
+        task_router_module,
+        "get_task_record_by_task_id",
+        fake_get_task_record_by_task_id,
+    )
+
+    response = client.post("/api/v1/tasks/task-retry-409/retry")
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == "当前任务状态不允许重试"
+
+
 def test_unexpected_errors_are_wrapped_by_global_handler(monkeypatch):
     from fastapi.testclient import TestClient
 

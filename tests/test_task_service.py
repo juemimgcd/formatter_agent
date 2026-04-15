@@ -24,6 +24,16 @@ def _search_result(
     )
 
 
+@pytest.fixture(autouse=True)
+def stub_task_record_lookup(monkeypatch):
+    async def fake_get_task_record_by_task_id(db_session, task_id):
+        return None
+
+    monkeypatch.setattr(
+        task_service, "get_task_record_by_task_id", fake_get_task_record_by_task_id
+    )
+
+
 @pytest.mark.asyncio
 async def test_create_pending_task_trims_query_before_persist(monkeypatch):
     db = AsyncMock()
@@ -171,7 +181,9 @@ async def test_run_search_task_uses_fallback_when_structured_stage_times_out(
 
 
 @pytest.mark.asyncio
-async def test_run_search_task_uses_fixed_top_k_of_five(monkeypatch):
+async def test_run_search_task_uses_select_top_candidates_with_fixed_top_k_of_five(
+    monkeypatch,
+):
     db = AsyncMock()
 
     captured_top_k: list[int] = []
@@ -192,9 +204,9 @@ async def test_run_search_task_uses_fixed_top_k_of_five(monkeypatch):
             for index in range(6)
         ]
 
-    def fake_select_top_k_results(query, search_results, *, top_k):
+    def fake_select_top_candidates(query, items, *, top_k):
         captured_top_k.append(top_k)
-        return search_results[:top_k]
+        return items[:top_k]
 
     async def fake_build_structured_results(
         *, query, rebuilt_prompt_input_text, max_output_items
@@ -205,7 +217,7 @@ async def test_run_search_task_uses_fixed_top_k_of_five(monkeypatch):
         task_service, "update_task_record_status", fake_update_task_record_status
     )
     monkeypatch.setattr(task_service, "search_web", fake_search_web)
-    monkeypatch.setattr(task_service, "select_top_k_results", fake_select_top_k_results)
+    monkeypatch.setattr(task_service, "select_top_candidates", fake_select_top_candidates)
     monkeypatch.setattr(
         task_service, "build_structured_results", fake_build_structured_results
     )
@@ -380,3 +392,45 @@ async def test_run_search_task_keeps_structured_results_order_and_duplicates(
         "第一条重复结果",
         "第二条重复结果",
     ]
+
+
+@pytest.mark.asyncio
+async def test_run_search_task_returns_cancelled_when_marked_cancelled_before_failure(
+    monkeypatch,
+):
+    db = AsyncMock()
+    status_updates: list[TaskStatus] = []
+
+    async def fake_update_task_record_status(
+        db_session, task_id, status, extra_data=None
+    ):
+        status_updates.append(status)
+        return None
+
+    async def fake_search_web(query, *, max_results):
+        raise TimeoutError("search timeout")
+
+    async def fake_get_task_record_by_task_id(db_session, task_id):
+        return type(
+            "Record",
+            (),
+            {"status": TaskStatus.CANCELLED, "task_id": task_id, "query": "AI 产品经理"},
+        )()
+
+    monkeypatch.setattr(
+        task_service, "update_task_record_status", fake_update_task_record_status
+    )
+    monkeypatch.setattr(task_service, "search_web", fake_search_web)
+    monkeypatch.setattr(
+        task_service, "get_task_record_by_task_id", fake_get_task_record_by_task_id
+    )
+
+    result = await task_service.run_search_task(
+        task_id="task-cancelled-001",
+        request=SearchRequest(query="AI 产品经理", max_results=5),
+        db=db,
+    )
+
+    assert status_updates == [TaskStatus.RUNNING]
+    assert result.status == TaskStatus.CANCELLED
+    assert result.message == "任务已取消"

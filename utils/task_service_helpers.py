@@ -8,63 +8,30 @@ from schemas.task_schema import TaskItem, TaskStatus
 
 
 def clean_text(value: str) -> str:
+    # 清洗文本中的首尾空白和多余空格。
     return re.sub(r"\s+", " ", (value or "").strip())
 
 
 def _normalize_url(url: str) -> str:
+    # 统一规范 URL 形式并移除尾部斜杠。
     return clean_text(url).rstrip("/")
 
 
 def _extract_source(url: str, fallback: str = "") -> str:
+    # 从 URL 中提取来源域名，并在缺失时使用兜底来源。
     host = urlparse(url).netloc.lower()
     if host.startswith("www."):
         host = host[4:]
     return host or clean_text(fallback) or "unknown"
 
 
-def select_top_k_results(
-    query: str,
-    search_results: list[SearchResult],
-    *,
-    top_k: int,
-) -> list[SearchResult]:
-    del query
-
-    selected: list[SearchResult] = []
-    seen_urls: set[str] = set()
-    for item in search_results:
-        normalized_url = _normalize_url(item.url)
-        if not normalized_url or normalized_url in seen_urls:
-            continue
-        if not clean_text(item.title):
-            continue
-
-        selected.append(
-            item.model_copy(
-                update={
-                    "title": clean_text(item.title),
-                    "url": normalized_url,
-                    "snippet": clean_text(item.snippet),
-                    "source": clean_text(item.source),
-                }
-            )
-        )
-        seen_urls.add(normalized_url)
-        if len(selected) >= top_k:
-            break
-
-    return selected
-
-
 def build_candidates(
     task_id: str,
-    query: str,
     search_results: list[SearchResult],
     *,
     search_provider: str,
 ) -> list[CandidateResultItem]:
-    del query
-
+    # 将搜索结果转换为后续重排和结构化阶段使用的候选项。
     candidates: list[CandidateResultItem] = []
     for index, item in enumerate(search_results, start=1):
         title = clean_text(item.title)
@@ -93,6 +60,7 @@ def build_fallback_structured_items(
     top_results: list[CandidateResultItem],
     max_results: int,
 ) -> list[StructuredResultItem]:
+    # 在结构化抽取失败时用候选结果生成保底结构化结果。
     fallback_items: list[StructuredResultItem] = []
     for index, item in enumerate(top_results[:max_results], start=1):
         summary = clean_text(item.summary) or clean_text(item.extraction_notes)
@@ -119,6 +87,7 @@ def build_result_payload(
     excel_path: str | None = None,
     error_message: str | None = None,
 ) -> dict:
+    # 构造写回任务记录的结果载荷字典。
     payload: dict = {
         "result_count": len(result_items),
         "excel_path": excel_path,
@@ -140,6 +109,7 @@ def build_task_item(
     error: str | None = None,
     preview_limit: int = 3,
 ) -> TaskItem:
+    # 组装接口层统一使用的任务返回对象。
     normalized_items = result_items or []
     return TaskItem(
         task_id=task_id,
@@ -155,6 +125,7 @@ def build_task_item(
 
 
 def deduplicate_candidates(items: list[CandidateResultItem]) -> list[CandidateResultItem]:
+    # 按 URL 去重候选结果并统一保留规范化后的链接。
     deduplicated: list[CandidateResultItem] = []
     seen_urls: set[str] = set()
     for item in items:
@@ -167,6 +138,7 @@ def deduplicate_candidates(items: list[CandidateResultItem]) -> list[CandidateRe
 
 
 def score_candidate(query: str, item: CandidateResultItem) -> float:
+    # 根据查询词命中情况为候选结果计算一个简单相关性分数。
     terms = [term for term in clean_text(query).lower().split(" ") if term]
     haystack = f"{item.title} {item.summary}".lower()
     matches = sum(term in haystack for term in terms)
@@ -181,6 +153,7 @@ def select_top_candidates(
     *,
     top_k: int,
 ) -> list[CandidateResultItem]:
+    # 对候选结果按相关性排序后截取前 top_k 条。
     ranked = sorted(
         deduplicate_candidates(items),
         key=lambda item: score_candidate(query, item),

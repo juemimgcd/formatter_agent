@@ -10,6 +10,7 @@ from utils.result_prompt import get_structured_result_prompt
 def normalize_structured_item(
     query: str, item: StructuredResultItem
 ) -> StructuredResultItem:
+    # 清洗并补齐单条结构化结果的默认字段和值域。
     return item.model_copy(
         update={
             "query": (item.query or "").strip() or query,
@@ -32,6 +33,7 @@ async def build_structured_results(
     rebuilt_prompt_input_text: str,
     max_output_items: int,
 ) -> list[StructuredResultItem]:
+    # 调用提示词、LLM 和解析器链路生成最终结构化结果列表。
     parser = PydanticOutputParser(pydantic_object=StructuredResultSet)
     prompt = get_structured_result_prompt(
         parser.get_format_instructions(),

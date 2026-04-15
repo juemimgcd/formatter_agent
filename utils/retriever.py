@@ -11,6 +11,7 @@ RebuildPromptPayload = dict[str, Any]
 
 def trim_text(text: str, limit: int) -> str:
     """裁剪文本长度并在超长时追加省略号。"""
+    # 将文本裁剪到指定长度以内并保持输出可读。
     merged = text.strip()
     if limit <= 0:
         return merged
@@ -34,6 +35,7 @@ def build_rebuild_prompt_payload(
     - summary / extraction_notes 截断；
     - 保留 rerank score 便于 LLM 做排序参考。
     """
+    # 把候选搜索结果整理成二阶段结构化抽取使用的稳定输入数据。
     results: list[dict[str, Any]] = []
     for item in top_candidates[:max_items]:
         url = (item.url or "").strip()
@@ -69,6 +71,7 @@ def build_rebuild_prompt_input(
 
     返回值会用于传入二阶段 LLM（结构化抽取）作为上下文输入。
     """
+    # 将重建后的提示词载荷序列化成可直接传给 LLM 的 JSON 文本。
     payload = build_rebuild_prompt_payload(
         query,
         top_candidates,

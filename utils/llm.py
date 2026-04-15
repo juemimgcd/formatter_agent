@@ -17,6 +17,7 @@ def get_llm() -> ChatOpenAI:
     Raises:
         ExtractionError: 未配置 `DASHSCOPE_API_KEY`（或对应的兼容 API Key）时抛出。
     """
+    # 按当前配置创建并缓存结构化抽取阶段复用的 LLM 客户端。
     if not settings.dashscope_api_key:
         raise ExtractionError("DASHSCOPE_API_KEY 未配置，无法执行结构化抽取")
 

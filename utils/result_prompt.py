@@ -13,6 +13,7 @@ def get_structured_result_prompt(
     Returns:
         可直接与 LLM/Parser 组成链路的 LangChain prompt。
     """
+    # 生成结构化结果整理阶段使用的提示词模板。
     return ChatPromptTemplate.from_messages(
         [
             (

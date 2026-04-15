@@ -23,7 +23,7 @@ EXCEL_COLUMNS = [
 
 def build_excel_filename(query: str) -> str:
     """根据查询主题生成导出文件名。"""
-
+    # 将查询词转换为安全且带时间戳的 Excel 文件名。
     sanitized = re.sub(r"[\\/:*?\"<>|]", "_", query).strip()
     sanitized = re.sub(r"\s+", "_", sanitized)
     if not sanitized:
@@ -35,7 +35,7 @@ def build_excel_filename(query: str) -> str:
 
 def export_results_to_excel(items: list[StructuredResultItem], filename: str | None = None) -> str:
     """把结果写入 Excel 文件并返回最终路径。"""
-
+    # 把结构化结果导出为 Excel 文件并返回绝对路径。
     output_dir = settings.output_dir
     output_dir.mkdir(parents=True, exist_ok=True)
 
