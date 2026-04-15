@@ -401,6 +401,83 @@ uv run uvicorn main:app --reload --host 127.0.0.1 --port 8000
 docker compose up --build
 ```
 
+## 压测
+
+项目提供两个压测脚本：
+
+- `scripts/benchmark_api.py`：固定请求总量的基准测试，适合快速比较单次改动前后的接口延迟。
+- `scripts/load_test_api.py`：持续时长型压测，适合观察固定并发下的吞吐、延迟分位数和错误率。
+
+先启动 API，再运行压测脚本：
+
+```bash
+uv run python scripts/load_test_api.py --scenario health --duration-seconds 30 --concurrency 20
+```
+
+如果要压任务链路，需要确保 PostgreSQL、Redis、Celery worker 都已启动：
+
+```bash
+uv run python scripts/load_test_api.py --scenario mixed --duration-seconds 60 --concurrency 10 --max-results 1
+```
+
+输出 JSON 方便后续归档或画图：
+
+```bash
+uv run python scripts/load_test_api.py --scenario mixed --duration-seconds 60 --concurrency 10 --output json
+```
+
+### 本机实测结果
+
+测试环境：Windows 本机开发环境，API 使用 `uv run uvicorn main:app --host 127.0.0.1 --port 8000` 单进程启动，压测客户端与服务端在同一台机器上。测试时间：2026-04-15。
+
+| 接口场景 | 压测参数 | 请求数 | 成功率 | 吞吐量 RPS | 平均响应 | P50 | P95 | P99 | 状态码 |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
+| `GET /health` | `30s / concurrency=20` | 32553 | 100.00% | 1091.38 | 18.31ms | 8.42ms | 61.29ms | 101.72ms | `200: 32553` |
+| `GET /api/v1/tasks` | `30s / concurrency=10` | 8663 | 100.00% | 290.25 | 34.43ms | 33.30ms | 38.20ms | 51.39ms | `200: 8663` |
+| `GET /api/v1/tasks/{task_id}` | `30s / concurrency=10` | 15436 | 100.00% | 518.20 | 19.29ms | 18.41ms | 22.49ms | 34.45ms | `200: 15436` |
+| `POST /api/v1/tasks/search` | `10s / concurrency=2 / think-time=100ms` | 115 | 100.00% | 11.67 | 64.21ms | 52.76ms | 164.57ms | 209.66ms | `202: 115` |
+
+对应命令：
+
+```bash
+uv run python scripts/load_test_api.py --scenario health --duration-seconds 30 --concurrency 20 --output json
+uv run python scripts/load_test_api.py --scenario list --duration-seconds 30 --concurrency 10 --output json
+uv run python scripts/load_test_api.py --scenario detail --duration-seconds 30 --concurrency 10 --output json
+uv run python scripts/load_test_api.py --scenario create --duration-seconds 10 --concurrency 2 --think-time-ms 100 --max-results 1 --output json
+```
+
+解读：
+
+- `/health` 主要反映 FastAPI/Uvicorn 的基础 HTTP 开销，不代表完整业务链路能力。
+- 任务列表和详情接口都经过数据库查询，当前本机读接口 P95 分别约为 `38.20ms` 和 `22.49ms`。
+- 任务创建接口会真实写库并投递 Celery/Redis，本次用低并发和 `think-time` 控制入队速度，测到的是安全压测参数下的受理能力，不是极限吞吐。
+- 这些数据是本机开发环境结果，生产环境需要在目标机器、目标 worker 数、目标数据库和 Redis 配置下重新压测。
+
+可选场景：
+
+- `health`：只压 `GET /health`，用于观察 API 基础吞吐和框架开销。
+- `create`：只压 `POST /api/v1/tasks/search`，会真实创建任务并入队。
+- `list`：只压 `GET /api/v1/tasks`，用于观察任务列表查询性能。
+- `detail`：先创建一个种子任务，再压 `GET /api/v1/tasks/{task_id}`。
+- `mixed`：按比例混合 `health / list / create / detail`，更接近综合访问形态。
+
+压测指标说明：
+
+- `total`：压测期间实际发出的请求总数。
+- `concurrency`：并发请求 worker 数，不等同于 QPS。
+- `rps`：每秒完成请求数，计算方式为 `total / duration_seconds`。
+- `success`：HTTP 状态码在 `2xx` 范围内的请求数。
+- `errors`：非 `2xx` 响应和请求异常数量。
+- `success_rate` / `error_rate`：成功率与错误率，单位是百分比。
+- `avg_ms`：平均响应耗时，容易受慢请求影响。
+- `p50_ms`：中位响应耗时，代表典型请求体验。
+- `p90_ms` / `p95_ms` / `p99_ms`：尾部延迟，优先关注 `p95_ms` 和 `p99_ms` 是否异常放大。
+- `min_ms` / `max_ms`：最小和最大响应耗时，用于快速发现极端值。
+- `status_codes`：状态码分布，用于区分参数错误、服务错误、限流或上游异常。
+- `sample_errors`：最多保留 5 条错误样本，便于快速定位失败原因。
+
+注意：`create` 和 `mixed` 场景会真实调用任务创建接口，可能触发 worker 搜索、LLM 调用和 Excel 导出。压测前建议把 `--max-results` 设小，并确认测试环境的模型额度、Redis 队列和数据库写入能力足够。
+
 ## 测试
 
 运行测试：

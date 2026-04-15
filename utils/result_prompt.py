@@ -4,15 +4,6 @@ from langchain_core.prompts import ChatPromptTemplate
 def get_structured_result_prompt(
     format_instructions: str, max_items: int = 10
 ) -> ChatPromptTemplate:
-    """构造结构化整理阶段使用的 ChatPromptTemplate。
-
-    Args:
-        format_instructions: 由输出解析器提供的格式约束说明（通常是 JSON schema / 字段规则）。
-        max_items: 允许输出的最大条数。
-
-    Returns:
-        可直接与 LLM/Parser 组成链路的 LangChain prompt。
-    """
     # 生成结构化结果整理阶段使用的提示词模板。
     return ChatPromptTemplate.from_messages(
         [
