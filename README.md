@@ -6,7 +6,7 @@
 
 - 任务受理链路已经切到 `create -> queued -> worker -> running -> success/failed`
 - 查询进入执行链路前会先解析为通用查询形态 intent：`general / lookup / collection / comparison`
-- 当前默认使用 `generic_search_result` 输出 schema，后续可以扩展为更多查询形态 schema
+- 输出 schema 通过独立解析层管理，便于扩展更多结构化结果形态
 - 执行侧已加入轻量 planner，用于显式表达 `search -> rank -> structure -> export` 的计划
 - 搜索结果经过统一清洗、top-k 选择、候选映射后再进入结构化阶段
 - 结构化阶段已恢复真实 `prompt + llm + parser` 实现
@@ -16,7 +16,7 @@
 
 ## System Design Philosophy
 
-本项目不是某个垂直场景 Agent，而是一个通用结构化数据生成 pipeline：
+本项目定位为面向开放查询场景的结构化 Agent Pipeline：通过意图理解、Schema 解析、任务规划、联网检索、结构化抽取和结果质量标注，把自然语言问题稳定转化为可查询、可导出、可复用的结构化数据。
 
 ```text
 Natural Language Query
@@ -31,11 +31,11 @@ Natural Language Query
 
 设计原则：
 
-- 领域无关：具体业务查询只是使用场景，不是系统边界。
-- Schema 可扩展：当前只有默认 `generic_search_result`，但 schema 解析层已经独立。
-- Workflow-first：保留稳定工程链路，不引入复杂多轮 Agent runtime。
-- 轻量 Agent-like：用 Intent、Schema、Planner、Task Memory 表达可解释执行过程。
-- 不做独立自我评估模块：只做 `result_quality` 标注，不触发自动重试或自我修复循环。
+- 开放场景适配：以自然语言查询为入口，将不同主题的检索需求统一收敛到稳定的结构化数据生成链路。
+- Schema 驱动输出：通过 Schema Resolver 管理输出结构，让结果字段、校验规则和后续扩展保持清晰边界。
+- Workflow-first：以可观测、可恢复的任务工作流承载 Agent 能力，保证提交、执行、查询、重试和导出链路稳定可控。
+- 可解释执行：用 Intent、Schema、Planner、Task Memory 串联关键决策，让每个任务都能追踪“理解了什么、计划怎么做、最终产出了什么”。
+- 质量内建：在结构化结果中保留 fallback、quality、warnings 等质量信号，让调用方能识别结果可靠性并做后续处理。
 
 ## 技术栈
 
@@ -502,11 +502,11 @@ uv run pytest
 34 passed
 ```
 
-## Design Trade-offs
+## Engineering Highlights
 
-- HTML 搜索 provider：成本低、便于本地 demo，但稳定性弱于商业搜索 API。
-- `top-k=5`：在召回、LLM token 成本、延迟和结构化稳定性之间取平衡。
-- snippet-based extraction：保持链路轻量，但牺牲网页正文级信息密度。
-- generic schema first：先证明 schema 层存在，不急于过早堆多套场景 schema。
-- no separate tool registry：工具名直接放在 `PlanStep.tool_name`，保留可解释性，同时减少运行时代码。
-- no self-evaluation module：只做结果质量标注，不引入不可控的多轮自我修复。
+- 多阶段任务链路：API 受理、Celery 派发、Worker 执行、状态查询和结果导出边界清晰，便于扩展和排障。
+- 可解释 Agent 流程：Intent、Schema、Planner、Task Memory 共同记录任务理解、执行计划和结果质量。
+- 结构化优先：搜索结果会经过清洗、候选构造、top-k 重排、LLM 抽取和 fallback 兜底，保证接口返回稳定结构。
+- 质量信号内置：`used_fallback / result_quality / warnings` 直接进入任务结果，方便前端展示和调用方判断可靠性。
+- 性能可观测：提供固定总量 benchmark 和持续时长 load test 两类脚本，可直接观察 RPS、平均响应时间、P95/P99 和错误率。
+- 本地与容器双路径：支持本地 `uv` 启动，也提供 Docker Compose 编排 API、worker、db 和 redis。
