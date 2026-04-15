@@ -22,8 +22,8 @@ def _result(*, title: str, score: int) -> StructuredResultItem:
     )
 
 
-def test_export_results_to_excel_creates_file(tmp_path, monkeypatch):
-    monkeypatch.setattr(settings, "output_dir", tmp_path)
+def test_export_results_to_excel_creates_file(test_output_dir, monkeypatch):
+    monkeypatch.setattr(settings, "output_dir", test_output_dir)
 
     excel_path = export_results_to_excel(
         [_result(title="first", score=91), _result(title="second", score=77)],
@@ -33,8 +33,10 @@ def test_export_results_to_excel_creates_file(tmp_path, monkeypatch):
     assert Path(excel_path).exists()
 
 
-def test_export_results_to_excel_preserves_expected_columns(tmp_path, monkeypatch):
-    monkeypatch.setattr(settings, "output_dir", tmp_path)
+def test_export_results_to_excel_preserves_expected_columns(
+    test_output_dir, monkeypatch
+):
+    monkeypatch.setattr(settings, "output_dir", test_output_dir)
 
     excel_path = export_results_to_excel([_result(title="first", score=91)])
 

@@ -5,7 +5,7 @@ from pathlib import Path
 import pandas as pd
 
 from conf.settings import settings
-from schemas import StructuredResultItem
+from schemas.search_schema import StructuredResultItem
 from utils.exceptions import ExcelExportError
 
 EXCEL_COLUMNS = [

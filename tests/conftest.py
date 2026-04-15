@@ -1,7 +1,14 @@
 import os
+from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
+
+
+TEST_TMP_DIR = Path("E:/python_files/rebuild_agent/.tmp")
+TEST_TMP_DIR.mkdir(parents=True, exist_ok=True)
+os.environ.setdefault("TMP", str(TEST_TMP_DIR))
+os.environ.setdefault("TEMP", str(TEST_TMP_DIR))
 
 
 os.environ.setdefault(
@@ -31,3 +38,10 @@ def override_dependencies():
 def client():
     with TestClient(app) as test_client:
         yield test_client
+
+
+@pytest.fixture
+def test_output_dir():
+    output_dir = TEST_TMP_DIR / "pytest-output"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    yield output_dir

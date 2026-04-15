@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 from models.task_record import TaskRecord
-from schemas import StructuredResultItem, TaskItem, TaskStatus
+from schemas.search_schema import StructuredResultItem
+from schemas.task_schema import TaskItem, TaskStatus
 
 
 def parse_task_status(value: str) -> TaskStatus:
@@ -45,7 +46,8 @@ def build_task_item_from_record(record: TaskRecord) -> TaskItem:
         message = "任务执行完成" if total_items > 0 else "未找到可用结果"
     else:
         message = {
-            TaskStatus.PENDING: "任务已创建",
+            TaskStatus.CREATED: "任务已创建",
+            TaskStatus.QUEUED: "任务已排队",
             TaskStatus.RUNNING: "任务执行中",
             TaskStatus.FAILED: "任务失败",
         }.get(status, "ok")

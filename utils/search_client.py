@@ -8,7 +8,7 @@ import httpx
 from lxml import html
 
 from conf.settings import settings
-from schemas import SearchResult
+from schemas.search_schema import SearchResult
 from utils.exceptions import WorkflowError
 
 DEFAULT_HEADERS = {

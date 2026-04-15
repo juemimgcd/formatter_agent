@@ -1,15 +1,16 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from conf.db_conf import get_db
-from crud import get_task_record_by_task_id
-from schemas import SearchRequest, TaskItem
+from crud import get_task_record_by_task_id, update_task_record_status
+from schemas.search_schema import SearchRequest
+from schemas.task_schema import TaskItem, TaskStatus
+from utils.response import success_response
+from utils.task_dispatcher import dispatch_task
 from utils.task_presenter import build_task_item_from_record
 from utils.task_service import create_pending_task
-from utils.task_runner import execute_task_by_id
-from utils.response import success_response
 
 router = APIRouter(prefix="/tasks", tags=["tasks"])
 
@@ -17,7 +18,6 @@ router = APIRouter(prefix="/tasks", tags=["tasks"])
 @router.post("/search")
 async def create_search_task(
     request: SearchRequest,
-    background_tasks: BackgroundTasks,
     db: AsyncSession = Depends(get_db),
 ):
     task = await create_pending_task(request, db)
@@ -29,13 +29,25 @@ async def create_search_task(
     if db is not None:
         await db.commit()
 
-    background_tasks.add_task(execute_task_by_id, task.task_id, request)
+    dispatch_result = await dispatch_task(task.task_id, request)
+    if not dispatch_result.accepted:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="任务派发失败",
+        )
 
-    return success_response(
-        data=TaskItem.model_validate(task),
-        status_code=202,
-        background=background_tasks,
+    queued_task = TaskItem.model_validate(task).model_copy(
+        update={
+            "status": TaskStatus.QUEUED,
+            "message": "任务已排队",
+        }
     )
+
+    if db is not None:
+        await update_task_record_status(db, task.task_id, TaskStatus.QUEUED)
+        await db.commit()
+
+    return success_response(data=queued_task, status_code=202)
 
 
 @router.get("/{task_id}")

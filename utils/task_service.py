@@ -6,13 +6,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from conf.logging_conf import app_logger
 from conf.settings import settings
 from crud import create_task_record, update_task_record_status
-from schemas import (
-    CandidateResultItem,
-    SearchRequest,
-    StructuredResultItem,
-    TaskItem,
-    TaskStatus,
-)
+from schemas.search_schema import CandidateResultItem, SearchRequest, StructuredResultItem
+from schemas.task_schema import TaskItem, TaskStatus
 from utils.excel_service import export_results_to_excel
 from utils.retriever import build_rebuild_prompt_input
 from utils.search_client import search_web
@@ -25,6 +20,19 @@ from utils.task_service_helpers import (
     clean_text,
     select_top_k_results,
 )
+from datetime import datetime, timezone
+from schemas.task_runtime_schema import StageTimestampPatch
+
+
+def build_stage_update(stage: str) -> StageTimestampPatch:
+    now = datetime.now(timezone.utc)
+    mapping = {
+        "search": StageTimestampPatch(search_finished_at=now),
+        "llm": StageTimestampPatch(llm_finished_at=now),
+        "export": StageTimestampPatch(export_finished_at=now),
+    }
+    return mapping.get(stage, StageTimestampPatch())
+
 
 logger = app_logger.bind(module="task_service")
 
@@ -56,6 +64,7 @@ async def extract_structured_results(
         rebuilt_prompt_input_text=rebuilt_prompt_input_text,
         max_output_items=max_results,
     )
+    
     timeout_seconds = settings.structured_stage_timeout_seconds
     if timeout_seconds > 0:
         task = asyncio.wait_for(task, timeout=timeout_seconds)
@@ -87,7 +96,7 @@ async def extract_structured_results(
 
 
 async def create_pending_task(request: SearchRequest, db: AsyncSession) -> TaskItem:
-    """创建 pending 任务记录并返回对外任务对象。"""
+    """创建 created 任务记录并返回对外任务对象。"""
     task_id = build_task_id()
     query = clean_text(request.query)
     await create_task_record(
@@ -95,14 +104,14 @@ async def create_pending_task(request: SearchRequest, db: AsyncSession) -> TaskI
         {
             "task_id": task_id,
             "query": query,
-            "status": TaskStatus.PENDING,
+            "status": TaskStatus.CREATED,
             **build_result_payload([]),
         },
     )
     return build_task_item(
         task_id=task_id,
         query=query,
-        status=TaskStatus.PENDING,
+        status=TaskStatus.CREATED,
         message="任务已创建",
         preview_limit=PREVIEW_ITEM_LIMIT,
     )

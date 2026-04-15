@@ -2,6 +2,7 @@ import importlib
 
 from models.task_record import TaskRecord
 from schemas import StructuredResultItem, TaskItem, TaskStatus
+from schemas.task_dispatch_schema import DispatchPayload, DispatchResult
 
 
 task_router_module = importlib.import_module("routers.task_router")
@@ -24,7 +25,7 @@ def test_health_endpoint_returns_healthy_status(client):
 
 
 def test_create_search_task_returns_accepted_pending_task(client, monkeypatch):
-    scheduled_calls: list[tuple[str, str]] = []
+    dispatched_calls: list[tuple[str, str]] = []
 
     async def fake_create_pending_task(request, db):
         assert request.query == "AI 产品经理"
@@ -32,22 +33,34 @@ def test_create_search_task_returns_accepted_pending_task(client, monkeypatch):
         return TaskItem(
             task_id="task-001",
             query=request.query,
-            status=TaskStatus.PENDING,
+            status=TaskStatus.CREATED,
             total_items=0,
             preview_items=[],
             result_items=[],
             message="任务已创建",
         )
 
-    async def fake_execute_task_by_id(task_id, request):
-        scheduled_calls.append((task_id, request.query))
+    async def fake_dispatch_task(task_id, request):
+        dispatched_calls.append((task_id, request.query))
+        return DispatchResult(
+            accepted=True,
+            task_id=task_id,
+            dispatch_mode="celery",
+            request_payload=DispatchPayload(
+                task_id=task_id,
+                query=request.query,
+                max_results=request.max_results,
+                submitted_at="2026-04-15T00:00:00+00:00",
+                dispatch_version="v1",
+            ),
+            queue="search_queue",
+            celery_task_id="celery-001",
+        )
 
     monkeypatch.setattr(
         task_router_module, "create_pending_task", fake_create_pending_task
     )
-    monkeypatch.setattr(
-        task_router_module, "execute_task_by_id", fake_execute_task_by_id
-    )
+    monkeypatch.setattr(task_router_module, "dispatch_task", fake_dispatch_task)
 
     response = client.post(
         "/api/v1/tasks/search",
@@ -58,11 +71,12 @@ def test_create_search_task_returns_accepted_pending_task(client, monkeypatch):
     payload = response.json()
     assert payload["success"] is True
     assert payload["data"]["task_id"] == "task-001"
-    assert payload["data"]["status"] == "pending"
+    assert payload["data"]["status"] == "queued"
     assert payload["data"]["preview_items"] == []
     assert payload["data"]["result_items"] == []
+    assert payload["data"]["message"] == "任务已排队"
 
-    assert scheduled_calls == [("task-001", "AI 产品经理")]
+    assert dispatched_calls == [("task-001", "AI 产品经理")]
 
 
 def test_create_search_task_returns_http_400_when_task_creation_returns_empty(

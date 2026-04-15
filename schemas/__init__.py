@@ -1,10 +1,12 @@
 from schemas.common import ApiResponse
-from schemas.task_schema import (
+from schemas.search_schema import (
     CandidateResultItem,
     SearchRequest,
     SearchResult,
     StructuredResultItem,
     StructuredResultSet,
+)
+from schemas.task_schema import (
     TaskItem,
     TaskStatus,
 )

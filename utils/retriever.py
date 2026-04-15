@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from schemas import CandidateResultItem
+from schemas.search_schema import CandidateResultItem
 
 
 RebuildPromptPayload = dict[str, Any]

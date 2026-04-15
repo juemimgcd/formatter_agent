@@ -1,8 +1,11 @@
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
-
+from sqlalchemy import desc, or_, select
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.sql.elements import ColumnElement
 from models.task_record import TaskRecord
-from schemas import TaskStatus
+from models.task_record import TaskRecord
+from schemas.task_schema import TaskStatus
 
 
 async def create_task_record(db: AsyncSession, payload: dict):
@@ -11,7 +14,7 @@ async def create_task_record(db: AsyncSession, payload: dict):
     record = TaskRecord(
         task_id=payload.get("task_id", ""),
         query=payload.get("query", ""),
-        status=str(payload.get("status", TaskStatus.PENDING)),
+        status=str(payload.get("status", TaskStatus.CREATED)),
         result_count=payload.get("result_count", 0),
         excel_path=payload.get("excel_path"),
         result_payload=payload.get("result_payload"),
@@ -54,3 +57,43 @@ async def update_task_record_status(
 
     await db.flush()
     return record
+
+
+
+
+
+def build_task_query_filters(
+    *,
+    status: str | None,
+    query: str | None,
+) -> list[ColumnElement[bool]]:
+    filters: list[ColumnElement[bool]] = []
+    if status:
+        filters.append(TaskRecord.status == status)
+    if query:
+        filters.append(
+            or_(
+                TaskRecord.query.ilike(f"%{query}%"),
+                TaskRecord.task_id.ilike(f"%{query}%"),
+            )
+        )
+    return filters
+
+
+async def list_task_records(
+    db: AsyncSession,
+    *,
+    status: str | None = None,
+    query: str | None = None,
+    limit: int = 20,
+    offset: int = 0,
+) -> list[TaskRecord]:
+    stmt = (
+        select(TaskRecord)
+        .where(*build_task_query_filters(status=status, query=query))
+        .order_by(desc(TaskRecord.created_at))
+        .offset(offset)
+        .limit(limit)
+    )
+    result = await db.execute(stmt)
+    return list(result.scalars().all())

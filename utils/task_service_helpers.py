@@ -1,58 +1,25 @@
+from __future__ import annotations
+
 import re
+from urllib.parse import urlparse
 
-from schemas import (
-    CandidateResultItem,
-    SearchResult,
-    StructuredResultItem,
-    TaskItem,
-    TaskStatus,
-)
+from schemas.search_schema import CandidateResultItem, SearchResult, StructuredResultItem
+from schemas.task_schema import TaskItem, TaskStatus
 
 
-def clean_text(value: str | None, default: str = "") -> str:
-    """清洗文本并在为空时返回默认值。"""
-    return (value or "").strip() or default
+def clean_text(value: str) -> str:
+    return re.sub(r"\s+", " ", (value or "").strip())
 
 
-def extract_query_terms(query: str) -> list[str]:
-    """把 query 规范化为可用于匹配打分的词项列表。"""
-    return re.sub(r"[^\w\u4e00-\u9fff]+", " ", clean_text(query).lower()).split()
+def _normalize_url(url: str) -> str:
+    return clean_text(url).rstrip("/")
 
 
-def score_search_result(query: str, result: SearchResult) -> float:
-    """根据排序位置和关键词覆盖率计算结果分数。"""
-    terms = list(dict.fromkeys(extract_query_terms(query)))
-    haystack = f"{result.title} {result.snippet}".lower()
-    coverage = sum(term in haystack for term in terms) / len(terms) if terms else 0.0
-    rank_score = max(0.25, 1.0 - (max(1, result.rank) - 1) * 0.08)
-    return round(min(0.6 * rank_score + 0.4 * coverage, 0.99), 4)
-
-
-def build_fallback_structured_items(
-    *,
-    query: str,
-    top_results: list[CandidateResultItem],
-    max_results: int,
-) -> list[StructuredResultItem]:
-    """把候选结果直接降级映射成结构化结果。"""
-    return [
-        StructuredResultItem(
-            query=query,
-            title=clean_text(row.title, "未命名结果"),
-            source=clean_text(row.source, "unknown"),
-            url=clean_text(row.url),
-            content_type="unknown",
-            region="不限",
-            role_direction="通用",
-            summary=clean_text(row.summary),
-            quality_score=max(0, min(int((row.rerank_score or 0.0) * 100), 100)),
-            extraction_notes=clean_text(
-                row.extraction_notes,
-                "fallback_from_results_due_to_structured_timeout",
-            ),
-        )
-        for row in top_results[:max_results]
-    ]
+def _extract_source(url: str, fallback: str = "") -> str:
+    host = urlparse(url).netloc.lower()
+    if host.startswith("www."):
+        host = host[4:]
+    return host or clean_text(fallback) or "unknown"
 
 
 def select_top_k_results(
@@ -61,12 +28,32 @@ def select_top_k_results(
     *,
     top_k: int,
 ) -> list[SearchResult]:
-    """按启发式分数排序并截断到固定 top-k。"""
-    return sorted(
-        search_results,
-        key=lambda result: score_search_result(query, result),
-        reverse=True,
-    )[:top_k]
+    del query
+
+    selected: list[SearchResult] = []
+    seen_urls: set[str] = set()
+    for item in search_results:
+        normalized_url = _normalize_url(item.url)
+        if not normalized_url or normalized_url in seen_urls:
+            continue
+        if not clean_text(item.title):
+            continue
+
+        selected.append(
+            item.model_copy(
+                update={
+                    "title": clean_text(item.title),
+                    "url": normalized_url,
+                    "snippet": clean_text(item.snippet),
+                    "source": clean_text(item.source),
+                }
+            )
+        )
+        seen_urls.add(normalized_url)
+        if len(selected) >= top_k:
+            break
+
+    return selected
 
 
 def build_candidates(
@@ -76,43 +63,70 @@ def build_candidates(
     *,
     search_provider: str,
 ) -> list[CandidateResultItem]:
-    """把搜索结果转换成后续结构化阶段使用的候选列表。"""
+    del query
+
     candidates: list[CandidateResultItem] = []
-    for index, result in enumerate(search_results):
-        title = clean_text(result.title)
-        url = clean_text(result.url)
+    for index, item in enumerate(search_results, start=1):
+        title = clean_text(item.title)
+        url = _normalize_url(item.url)
         if not title or not url:
             continue
 
         candidates.append(
             CandidateResultItem(
-                candidate_id=f"{task_id}_{index}",
+                candidate_id=f"{task_id}-{index:02d}",
                 title=title,
                 url=url,
-                source=clean_text(result.source, "web"),
-                summary=clean_text(result.snippet, title),
-                extraction_notes=(
-                    f"search_provider={search_provider};"
-                    f"search_rank={max(1, int(result.rank or index + 1))}"
-                ),
-                rerank_score=float(score_search_result(query, result)),
+                source=_extract_source(url, item.source or search_provider),
+                summary=clean_text(item.snippet),
+                extraction_notes=f"provider={search_provider}; rank={item.rank}",
+                rerank_score=max(0.0, float(len(search_results) - index + 1)),
             )
         )
 
     return candidates
 
 
+def build_fallback_structured_items(
+    *,
+    query: str,
+    top_results: list[CandidateResultItem],
+    max_results: int,
+) -> list[StructuredResultItem]:
+    fallback_items: list[StructuredResultItem] = []
+    for index, item in enumerate(top_results[:max_results], start=1):
+        summary = clean_text(item.summary) or clean_text(item.extraction_notes)
+        fallback_items.append(
+            StructuredResultItem(
+                query=query,
+                title=clean_text(item.title) or "未命名结果",
+                source=clean_text(item.source) or "unknown",
+                url=_normalize_url(item.url),
+                content_type="unknown",
+                region="不限",
+                role_direction="通用",
+                summary=summary,
+                quality_score=max(40, 90 - (index - 1) * 10),
+                extraction_notes=clean_text(item.extraction_notes),
+            )
+        )
+
+    return fallback_items
+
+
 def build_result_payload(
-    items: list[StructuredResultItem],
+    result_items: list[StructuredResultItem],
     excel_path: str | None = None,
+    error_message: str | None = None,
 ) -> dict:
-    """把结构化结果打包成可持久化的 payload。"""
-    return {
-        "result_count": len(items),
+    payload: dict = {
+        "result_count": len(result_items),
         "excel_path": excel_path,
-        "result_payload": [item.model_dump(mode="json") for item in items],
-        "error_message": None,
+        "result_payload": [item.model_dump(mode="json") for item in result_items],
     }
+    if error_message is not None:
+        payload["error_message"] = error_message
+    return payload
 
 
 def build_task_item(
@@ -126,16 +140,50 @@ def build_task_item(
     error: str | None = None,
     preview_limit: int = 3,
 ) -> TaskItem:
-    """统一构造接口层使用的 TaskItem。"""
-    items = result_items if result_items is not None else []
+    normalized_items = result_items or []
     return TaskItem(
         task_id=task_id,
         query=query,
         status=status,
-        total_items=len(items),
+        total_items=len(normalized_items),
         excel_path=excel_path,
-        preview_items=items[:preview_limit],
-        result_items=items,
+        preview_items=normalized_items[:preview_limit],
+        result_items=normalized_items,
         message=message,
         error=error,
     )
+
+
+def deduplicate_candidates(items: list[CandidateResultItem]) -> list[CandidateResultItem]:
+    deduplicated: list[CandidateResultItem] = []
+    seen_urls: set[str] = set()
+    for item in items:
+        normalized_url = _normalize_url(item.url)
+        if not normalized_url or normalized_url in seen_urls:
+            continue
+        deduplicated.append(item.model_copy(update={"url": normalized_url}))
+        seen_urls.add(normalized_url)
+    return deduplicated
+
+
+def score_candidate(query: str, item: CandidateResultItem) -> float:
+    terms = [term for term in clean_text(query).lower().split(" ") if term]
+    haystack = f"{item.title} {item.summary}".lower()
+    matches = sum(term in haystack for term in terms)
+    if not terms:
+        return 0.0
+    return round(matches / len(terms), 4)
+
+
+def select_top_candidates(
+    query: str,
+    items: list[CandidateResultItem],
+    *,
+    top_k: int,
+) -> list[CandidateResultItem]:
+    ranked = sorted(
+        deduplicate_candidates(items),
+        key=lambda item: score_candidate(query, item),
+        reverse=True,
+    )
+    return ranked[:top_k]

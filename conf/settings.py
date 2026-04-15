@@ -22,6 +22,14 @@ class Settings(BaseSettings):
         default="",
         validation_alias="DATABASE_URL",
     )
+    celery_broker_url: str = Field(
+        default="redis://127.0.0.1:6379/0",
+        validation_alias="CELERY_BROKER_URL",
+    )
+    celery_result_backend: str = Field(
+        default="redis://127.0.0.1:6379/1",
+        validation_alias="CELERY_RESULT_BACKEND",
+    )
 
     dashscope_api_key: str = Field(default="", validation_alias="DASHSCOPE_API_KEY")
     llm_base_url: str = Field(

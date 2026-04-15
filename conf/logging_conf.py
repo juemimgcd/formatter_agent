@@ -11,7 +11,7 @@ def setup_logger():
     logger.add(
         sys.stdout,
         level="INFO",
-        enqueue=True,
+        enqueue=False,
         backtrace=False,
         diagnose=False,
         format=(
@@ -25,7 +25,6 @@ def setup_logger():
 
 
 app_logger = logger
-
 
 
 
