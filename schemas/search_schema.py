@@ -9,11 +9,27 @@ class SearchRequest(BaseModel):
 
 
 class SearchResult(BaseModel):
+    """统一搜索候选结果。
+
+    基础字段保持向后兼容；额外字段用于 search pipeline 的归一化、
+    多特征重排和正文增强。
+    """
+
     title: str
     url: str
     snippet: str
     source: str
     rank: int
+    provider: str = ""
+    provider_rank: int = 0
+    normalized_url: str = ""
+    lexical_score: float = 0.0
+    intent_pattern_score: float = 0.0
+    source_score: float = 0.0
+    provider_rank_score: float = 0.0
+    final_score: float = 0.0
+    page_excerpt: str = ""
+    notes: list[str] = Field(default_factory=list)
 
 
 class CandidateResultItem(BaseModel):
@@ -24,6 +40,7 @@ class CandidateResultItem(BaseModel):
     url: str
     source: str = ""
     summary: str = ""
+    page_excerpt: str = ""
     extraction_notes: str = ""
     rerank_score: float = 0.0
 

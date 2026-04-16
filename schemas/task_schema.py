@@ -12,6 +12,7 @@ class TaskStatus(StrEnum):
     QUEUED = "queued"
     RUNNING = "running"
     PARTIAL_SUCCESS = "partial_success"
+    DEGRADED_SUCCESS = "degraded_success"
     SUCCESS = "success"
     FAILED = "failed"
     TIMEOUT = "timeout"

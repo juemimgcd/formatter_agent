@@ -68,6 +68,11 @@ class Settings(BaseSettings):
     )
     search_result_limit: int = Field(default=5, validation_alias="SEARCH_RESULT_LIMIT")
     search_region: str = Field(default="cn-zh", validation_alias="SEARCH_REGION")
+    search_enrich_top_k: int = Field(default=3, validation_alias="SEARCH_ENRICH_TOP_K")
+    search_enrich_excerpt_chars: int = Field(
+        default=1600,
+        validation_alias="SEARCH_ENRICH_EXCERPT_CHARS",
+    )
 
     output_dir: Path = BASE_DIR / "outputs"
 

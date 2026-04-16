@@ -12,6 +12,21 @@ from typing import Any
 
 import httpx
 
+TERMINAL_TASK_STATUSES = {
+    "success",
+    "partial_success",
+    "degraded_success",
+    "empty_result",
+    "failed",
+    "timeout",
+}
+SUCCESS_TASK_STATUSES = {
+    "success",
+    "partial_success",
+    "degraded_success",
+    "empty_result",
+}
+
 
 @dataclass(slots=True)
 class RequestRecord:
@@ -180,18 +195,12 @@ async def create_seed_task(
 
 def is_terminal_task_status(status: str | None) -> bool:
     # 判断任务状态是否已经结束，供 agent 端到端压测轮询使用。
-    return status in {
-        "success",
-        "partial_success",
-        "empty_result",
-        "failed",
-        "timeout",
-    }
+    return status in TERMINAL_TASK_STATUSES
 
 
 def is_success_task_status(status: str | None) -> bool:
-    # 将任务终态映射为压测成功/失败口径。
-    return status in {"success", "partial_success", "empty_result"}
+    # partial/degraded 都产出了可用结果，压测口径下计为成功。
+    return status in SUCCESS_TASK_STATUSES
 
 
 async def create_agent_task_and_wait(

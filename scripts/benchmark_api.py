@@ -10,6 +10,21 @@ from typing import Any
 
 import httpx
 
+TERMINAL_TASK_STATUSES = {
+    "success",
+    "partial_success",
+    "degraded_success",
+    "empty_result",
+    "failed",
+    "timeout",
+}
+SUCCESS_TASK_STATUSES = {
+    "success",
+    "partial_success",
+    "degraded_success",
+    "empty_result",
+}
+
 
 @dataclass(slots=True)
 class BenchmarkResult:
@@ -34,6 +49,9 @@ class AgentCompletionProbe:
     task_id: str | None = None
     task_status: str | None = None
     total_items: int = 0
+    result_quality: str = "unknown"
+    used_fallback: bool = False
+    warnings: list[str] | None = None
     error: str | None = None
 
 
@@ -184,18 +202,12 @@ def percentile(values: list[float], ratio: float) -> float:
 
 def is_terminal_task_status(status: str | None) -> bool:
     # 判断任务是否已经进入终态。
-    return status in {
-        "success",
-        "partial_success",
-        "empty_result",
-        "failed",
-        "timeout",
-    }
+    return status in TERMINAL_TASK_STATUSES
 
 
 def is_success_task_status(status: str | None) -> bool:
-    # 将任务终态转换成基准测试的成功/失败口径。
-    return status in {"success", "partial_success", "empty_result"}
+    # partial/degraded 都产出了可用结果，基准测试口径下计为成功。
+    return status in SUCCESS_TASK_STATUSES
 
 
 async def warmup(
@@ -326,6 +338,9 @@ async def create_agent_task_and_wait(
                 task_id=task_id,
                 task_status=last_status,
                 total_items=data.get("total_items", 0),
+                result_quality=data.get("result_quality", "unknown"),
+                used_fallback=bool(data.get("used_fallback", False)),
+                warnings=data.get("warnings", []),
                 error=None if success else f"terminal task status={last_status}",
             )
 

@@ -117,10 +117,15 @@ async def run_search_task(
         used_fallback = result.used_fallback
         result_quality = result.result_quality
         warnings = list(agent_output.warnings)
+        final_status = TaskStatus.SUCCESS
+        if used_fallback and final_items:
+            final_status = TaskStatus.PARTIAL_SUCCESS
+        elif warnings and final_items:
+            final_status = TaskStatus.DEGRADED_SUCCESS
 
         logger.info(
             "task={} stage=agent_final stop_reason={} raw_count={} selected_count={} "
-            "final_count={} quality={} fallback={} trace={}",
+            "final_count={} quality={} fallback={} status={} trace={}",
             task_id,
             agent_output.stop_reason,
             result.raw_result_count,
@@ -128,18 +133,19 @@ async def run_search_task(
             len(final_items),
             result_quality,
             used_fallback,
+            final_status,
             [trace.model_dump(mode="json") for trace in agent_output.trace],
         )
         await update_task_record_status(
             db,
             task_id=task_id,
-            status=TaskStatus.SUCCESS,
+            status=final_status,
             extra_data=build_result_payload(final_items, excel_path),
         )
         return build_task_item(
             task_id=task_id,
             query=query,
-            status=TaskStatus.SUCCESS,
+            status=final_status,
             message="任务执行完成" if final_items else "未找到可用结果",
             result_items=final_items,
             excel_path=excel_path,

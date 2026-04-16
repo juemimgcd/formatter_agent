@@ -4,7 +4,7 @@
 
 ## 当前状态
 
-- 任务受理链路已经切到 `create -> queued -> worker -> running -> success/failed`
+- 任务受理链路已经切到 `created -> queued -> worker -> running -> success / partial_success / degraded_success / failed`
 - 执行链路已收敛为 `TaskCompiler -> Agent Loop -> Finalizer`
 - `AgentState` 统一承载 query、task_type、schema、slots、evidence、trace、warnings 和 stop_reason
 - `Policy` 集中承担决策，只输出 `search / targeted_search / verify / finalize` 这 4 类动作
@@ -12,7 +12,7 @@
 - `Reducer` 把 observation 写回 state，并更新 slots、evidence、warnings 和 done 标记
 - 结构化失败或返回空结果时，会回退到候选结果生成 fallback 输出
 - 最终任务对象会返回 `used_fallback / result_quality / warnings`，Agent 输出内部保留 trace / slots / stop_reason
-- `pytest` 当前通过：`47 passed`
+- `pytest` 当前通过：`51 passed`
 
 ## System Design Philosophy
 
@@ -44,7 +44,7 @@ Natural Language Query
 - Web：FastAPI + Uvicorn
 - 任务调度：Celery + Redis
 - 数据库：PostgreSQL + SQLAlchemy Async + Alembic + asyncpg
-- 搜索：DuckDuckGo HTML / Sogou HTML + `httpx` + `lxml`
+- 搜索：DuckDuckGo HTML / Bing HTML / Sogou HTML + `httpx` + `lxml`
 - 结构化抽取：LangChain + OpenAI Compatible Chat API + Pydantic
 - 导出：Pandas + OpenPyXL
 - 日志：Loguru
@@ -82,6 +82,27 @@ Celery worker 消费任务
 -> 返回 preview_items / result_items / excel_path / status / error / result_quality / warnings
 ```
 
+## Search Design
+
+搜索模块采用“规则改写 + 多源召回 + 统一归一化 + 多特征重排 + 正文增强”的轻量 retrieval pipeline：
+
+- `query rewrite`：先对自然语言 query 做关键词提纯，并按 template / comparison / collection / lookup 这类意图补少量检索词，不引入重型 LLM 步骤。
+- `provider merge`：`SEARCH_PROVIDER=auto` 时不再“首个 provider 有结果就返回”，而是并发调用 DuckDuckGo / Bing / Sogou，把各来源 top candidates 合并成候选池。
+- `deduplicate + rank`：对 URL 去 tracking 参数、统一 scheme、合并 `www.`，再用标题近重复过滤；排序使用 lexical、intent pattern、source、provider rank 四类特征加权。
+- `content enrich`：对 top candidates 抓取页面标题、meta description 和正文前段文本，写入 `page_excerpt`，作为二阶段结构化抽取的证据上下文。
+- `observability`：搜索日志会记录 provider、rewrite query、raw/ranked/enriched 数量和 warning；部分 provider 或 enrich 失败时保留可用结果并进入降级语义。
+
+任务结果状态按语义区分：`success` 表示主链路完成；`partial_success` 表示结构化阶段失败但候选 fallback 可用；`degraded_success` 表示有 provider/enrich warning 但最终结果仍可用；`failed` 表示搜索或执行链路无法产出结果。
+
+Search 代码按职责拆成 4 个小文件，避免单个模块继续膨胀：
+
+```text
+utils/search_client.py      # 搜索入口、多源 merge、warning 注入
+utils/search_providers.py   # DuckDuckGo / Bing / Sogou 请求与 HTML 解析
+utils/search_pipeline.py    # query rewrite、候选重排、正文增强
+utils/search_support.py     # HTTP client、URL 规范化、文本清洗
+```
+
 ```mermaid
 flowchart TD
   U[用户输入 query + max_results]
@@ -103,7 +124,7 @@ flowchart TD
     REDUCE[Reducer<br/>observation -> state]
     DONE{done or round budget exhausted}
     FINAL[Finalizer<br/>result + warnings + stop_reason + trace]
-    DB_SUCCESS[(task_records<br/>status=success)]
+    DB_SUCCESS[(task_records<br/>status=success/partial/degraded)]
     DB_FAILED[(task_records<br/>status=failed)]
   end
 
@@ -187,7 +208,10 @@ agent_output = await run_agent(
 - `utils/task_service_helpers.py`：文本清洗、top-k、候选映射、fallback、结果拼装、质量标注
 - `utils/intent_parser.py`：把自然语言 query 解析为通用查询形态
 - `schemas/registry.py`：解析当前任务使用的输出 schema
-- `utils/search_client.py`：联网搜索 provider
+- `utils/search_client.py`：搜索入口与多源 merge 门面
+- `utils/search_providers.py`：DuckDuckGo / Bing / Sogou provider 请求与 HTML 解析
+- `utils/search_pipeline.py`：query rewrite、候选重排、正文增强
+- `utils/search_support.py`：搜索通用 HTTP、URL 和文本工具
 - `utils/retriever.py`：二阶段结构化输入重建
 - `utils/structured_result_builder.py`：LLM 结构化抽取
 - `utils/task_presenter.py`：数据库记录转接口模型
@@ -310,6 +334,8 @@ agent_output = await run_agent(
 - `timeout`
 - `partial_success`
 
+`degraded_success` 默认不进入重试范围，因为它仍然产出了可用结构化结果；调用方可根据 `warnings` 决定是否重新创建任务。
+
 说明：
 
 - 重试会清空旧的 `result_payload / excel_path / error_message`，并将任务重新派发到队列
@@ -357,10 +383,12 @@ Copy-Item .env.example .env
 - `DASHSCOPE_API_KEY`：结构化抽取使用的模型 API Key
 - `LLM_BASE_URL` / `LLM_MODEL_NAME`：OpenAI Compatible 模型配置
 - `STRUCTURED_STAGE_TIMEOUT_SECONDS`：结构化阶段超时
-- `SEARCH_PROVIDER`：默认 `auto`，按 `duckduckgo_html -> bing_html -> sogou_html` 顺序尝试普通搜索引擎；也可指定其中一个 provider 单独运行
+- `SEARCH_PROVIDER`：默认 `auto`，并发合并 `duckduckgo_html / bing_html / sogou_html` 结果；也可指定其中一个 provider 单独运行
 - `SEARCH_PROXY_URL`：搜索请求使用的显式代理，例如 `http://127.0.0.1:7890`；Celery worker 读不到系统代理时建议配置
 - `SEARCH_TRUST_ENV`：是否读取 `HTTP_PROXY / HTTPS_PROXY` 等环境代理，默认 `true`
 - `SEARCH_FAILURE_LLM_FALLBACK_ENABLED`：联网搜索失败时是否继续使用 LLM 本地知识兜底，默认 `true`；结果会带 warning，表示不是联网搜索结果
+- `SEARCH_ENRICH_TOP_K`：对重排后的前 N 条候选抓取正文片段，默认 `3`
+- `SEARCH_ENRICH_EXCERPT_CHARS`：每个候选正文片段保留的最大字符数，默认 `1600`
 
 `.env.example` 中已经包含上述默认项。
 
@@ -435,6 +463,8 @@ docker compose up --build
 - `create`：只测试 `POST /api/v1/tasks/search` 的受理和入队速度，不代表 Agent 已经执行完成。
 - `agent`：测试 `create + 轮询 GET /api/v1/tasks/{task_id} 直到终态`，更接近真实 Agent 任务端到端耗时。
 
+Agent 压测脚本会把 `success / partial_success / degraded_success / empty_result` 计为成功终态，把 `failed / timeout` 计为失败终态。`benchmark_api.py --include-agent-completion` 的样本输出会额外保留 `result_quality / used_fallback / warnings`，方便判断结果是否来自 fallback 或降级链路。
+
 先启动 API，再运行压测脚本：
 
 ```bash
@@ -503,7 +533,7 @@ uv run python scripts/load_test_api.py --scenario agent --duration-seconds 60 --
 - `create`：只压 `POST /api/v1/tasks/search`，会真实创建任务并入队，但不等待 Agent 完成。
 - `list`：只压 `GET /api/v1/tasks`，用于观察任务列表查询性能。
 - `detail`：先创建一个种子任务，再压 `GET /api/v1/tasks/{task_id}`。
-- `agent`：创建任务后持续轮询详情接口直到任务进入 `success / failed / timeout` 等终态，用于观察 Agent 端到端耗时。
+- `agent`：创建任务后持续轮询详情接口直到任务进入 `success / partial_success / degraded_success / failed / timeout` 等终态，用于观察 Agent 端到端耗时。
 - `mixed`：按比例混合 `health / list / create / detail`，更接近综合访问形态；默认不包含完整 `agent` 端到端任务，避免无意中大量触发搜索和 LLM。
 - 在 `agent` 场景中，`--duration-seconds` 表示持续发起任务的时间窗口；已经发起的任务会继续等待到终态或 `--poll-timeout-seconds`，所以脚本实际运行时间可能超过 `duration-seconds`。
 
@@ -512,14 +542,14 @@ uv run python scripts/load_test_api.py --scenario agent --duration-seconds 60 --
 - `total`：压测期间实际发出的请求总数。
 - `concurrency`：并发请求 worker 数，不等同于 QPS。
 - `rps`：每秒完成请求数，计算方式为 `total / duration_seconds`。
-- `success`：HTTP 状态码在 `2xx` 范围内的请求数。
+- `success`：HTTP 状态码在 `2xx` 范围内的请求数；在 `agent` 场景中，`partial_success / degraded_success` 会映射为成功口径。
 - `errors`：非 `2xx` 响应和请求异常数量。
 - `success_rate` / `error_rate`：成功率与错误率，单位是百分比。
 - `avg_ms`：平均响应耗时，容易受慢请求影响。
 - `p50_ms`：中位响应耗时，代表典型请求体验。
 - `p90_ms` / `p95_ms` / `p99_ms`：尾部延迟，优先关注 `p95_ms` 和 `p99_ms` 是否异常放大。
 - `min_ms` / `max_ms`：最小和最大响应耗时，用于快速发现极端值。
-- `status_codes`：状态码分布，用于区分参数错误、服务错误、限流或上游异常；在 `agent` 场景中，任务终态失败会被计入错误。
+- `status_codes`：状态码分布，用于区分参数错误、服务错误、限流或上游异常；在 `agent` 场景中，任务终态失败会被映射为 `500` 并计入错误。
 - `sample_errors`：最多保留 5 条错误样本，便于快速定位失败原因。
 
 注意：`create`、`agent` 和 `mixed` 场景会真实调用任务创建接口，可能触发 worker 搜索、LLM 调用和 Excel 导出。压测前建议把 `--max-results` 设小，并确认测试环境的模型额度、Redis 队列和数据库写入能力足够。

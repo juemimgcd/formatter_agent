@@ -206,7 +206,7 @@ async def test_run_search_task_uses_fallback_when_structured_stage_times_out(
 
     final_update = status_updates[-1][1]
 
-    assert result.status == TaskStatus.SUCCESS
+    assert result.status == TaskStatus.PARTIAL_SUCCESS
     assert result.total_items == 1
     assert result.preview_items[0].title == "AI 产品经理搜索结果"
     assert result.result_items[0].title == "AI 产品经理搜索结果"
@@ -264,7 +264,7 @@ async def test_run_search_task_uses_select_top_candidates_with_fixed_top_k_of_fi
     )
 
     assert captured_top_k == [5]
-    assert result.status == TaskStatus.SUCCESS
+    assert result.status == TaskStatus.PARTIAL_SUCCESS
     assert result.total_items == 5
     assert result.message == "任务执行完成"
 
@@ -352,7 +352,7 @@ async def test_run_search_task_falls_back_when_structured_results_are_empty(
         db=db,
     )
 
-    assert result.status == TaskStatus.SUCCESS
+    assert result.status == TaskStatus.PARTIAL_SUCCESS
     assert result.total_items == 1
     assert result.result_items[0].title == "宋词大全"
 
@@ -427,3 +427,60 @@ async def test_run_search_task_keeps_structured_results_order_and_duplicates(
         "第一条重复结果",
         "第二条重复结果",
     ]
+
+
+@pytest.mark.asyncio
+async def test_run_search_task_marks_degraded_success_when_search_has_warning(
+    monkeypatch,
+):
+    db = AsyncMock()
+
+    async def fake_update_task_record_status(
+        db_session, task_id, status, extra_data=None
+    ):
+        return None
+
+    async def fake_search_web(query, *, max_results):
+        return [
+            search_result_item(
+                title="AI 产品经理搜索结果",
+                url="https://example.com/item-1",
+                snippet="AI 产品经理搜索摘要",
+                rank=1,
+            ).model_copy(update={"notes": ["enrich_failed=TimeoutError"]})
+        ]
+
+    async def fake_build_structured_results(
+        *, query, rebuilt_prompt_input_text, max_output_items
+    ):
+        return [
+            task_service.StructuredResultItem(
+                query=query,
+                title="AI 产品经理搜索结果",
+                source="web",
+                url="https://example.com/item-1",
+                summary="结构化结果",
+                quality_score=80,
+            )
+        ]
+
+    monkeypatch.setattr(
+        task_service, "update_task_record_status", fake_update_task_record_status
+    )
+    monkeypatch.setattr(task_service, "search_web", fake_search_web)
+    monkeypatch.setattr(
+        task_service,
+        "build_structured_results",
+        fake_build_structured_results,
+    )
+    monkeypatch.setattr(task_service, "export_results_to_excel", lambda items: None)
+
+    result = await task_service.run_search_task(
+        task_id="task-degraded",
+        request=SearchRequest(query="AI 产品经理", max_results=5),
+        db=db,
+    )
+
+    assert result.status == TaskStatus.DEGRADED_SUCCESS
+    assert result.result_quality == "high"
+    assert result.warnings == ["enrich_failed=TimeoutError"]

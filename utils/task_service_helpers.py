@@ -51,8 +51,23 @@ def build_candidates(
                 url=url,
                 source=extract_candidate_source(url, item.source or search_provider),
                 summary=clean_text(item.snippet),
-                extraction_notes=f"provider={search_provider}; rank={item.rank}",
-                rerank_score=max(0.0, float(len(search_results) - index + 1)),
+                page_excerpt=clean_text(item.page_excerpt),
+                extraction_notes=clean_text(
+                    "; ".join(
+                        [
+                            f"provider={item.provider or search_provider}",
+                            f"provider_rank={item.provider_rank or item.rank}",
+                            f"rank={item.rank}",
+                            f"score={item.final_score:.4f}",
+                            *item.notes,
+                        ]
+                    )
+                ),
+                rerank_score=(
+                    item.final_score
+                    if item.final_score > 0
+                    else max(0.0, float(len(search_results) - index + 1))
+                ),
             )
         )
 
@@ -68,7 +83,11 @@ def build_fallback_structured_items(
     # 在结构化抽取失败时用候选结果生成保底结构化结果。
     fallback_items: list[StructuredResultItem] = []
     for index, item in enumerate(top_results[:max_results], start=1):
-        summary = clean_text(item.summary) or clean_text(item.extraction_notes)
+        summary = (
+            clean_text(item.summary)
+            or clean_text(item.page_excerpt)
+            or clean_text(item.extraction_notes)
+        )
         fallback_items.append(
             StructuredResultItem(
                 query=query,
@@ -233,7 +252,7 @@ def deduplicate_candidates(items: list[CandidateResultItem]) -> list[CandidateRe
 
 def score_candidate(query: str, item: CandidateResultItem) -> float:
     # 根据查询词命中情况为候选结果计算一个简单相关性分数。
-    haystack = f"{item.title} {item.summary}"
+    haystack = f"{item.title} {item.summary} {item.page_excerpt}"
     return calculate_text_relevance(query, haystack)
 
 
@@ -282,7 +301,7 @@ def filter_structured_items_by_candidates(
             warnings.append(f"drop structured item with unknown url: {item.title}")
             continue
 
-        candidate_text = f"{candidate.title} {candidate.summary}"
+        candidate_text = f"{candidate.title} {candidate.summary} {candidate.page_excerpt}"
         candidate_score = calculate_text_relevance(query, candidate_text)
         item_text = f"{item.title} {item.summary}"
         item_score = calculate_text_relevance(query, item_text)

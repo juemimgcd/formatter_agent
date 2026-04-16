@@ -81,6 +81,12 @@ async def run_search_action(
             summary=f"search failed: {error_message}",
         )
 
+    search_warnings = [
+        note
+        for result in search_results
+        for note in result.notes
+        if note.startswith("search_warning=") or note.startswith("enrich_failed")
+    ]
     raw_candidates = build_candidates_func(
         state.task_id,
         search_results,
@@ -96,6 +102,7 @@ async def run_search_action(
         raw_count=len(raw_candidates),
         selected_count=len(candidates),
         candidates=candidates,
+        warnings=search_warnings,
         summary=f"found {len(candidates)} candidates from {len(raw_candidates)} raw results",
     )
 

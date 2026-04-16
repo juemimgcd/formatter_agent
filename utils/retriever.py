@@ -26,6 +26,7 @@ def build_rebuild_prompt_payload(
     *,
     max_items: int = 12,
     max_summary_len: int = 180,
+    max_excerpt_len: int = 1200,
 ) -> RebuildPromptPayload:
     """构造二阶段结构化抽取所需的 JSON payload（Python dict 形式）。
 
@@ -33,6 +34,7 @@ def build_rebuild_prompt_payload(
     - 过滤空 URL；
     - 标题/来源默认值填充；
     - summary / extraction_notes 截断；
+    - page_excerpt 截断；
     - 保留 rerank score 便于 LLM 做排序参考。
     """
     # 把候选搜索结果整理成二阶段结构化抽取使用的稳定输入数据。
@@ -52,6 +54,7 @@ def build_rebuild_prompt_payload(
                 "region": "不限",
                 "role_direction": "通用",
                 "summary": trim_text(item.summary, max_summary_len),
+                "page_excerpt": trim_text(item.page_excerpt, max_excerpt_len),
                 "score": item.rerank_score or 0.0,
                 "extraction_notes": trim_text(item.extraction_notes, 240),
             }
@@ -66,6 +69,7 @@ def build_rebuild_prompt_input(
     *,
     max_items: int = 12,
     max_summary_len: int = 180,
+    max_excerpt_len: int = 1200,
 ) -> str:
     """将 `build_rebuild_prompt_payload` 的结果序列化为可读 JSON 文本。
 
@@ -77,5 +81,6 @@ def build_rebuild_prompt_input(
         top_candidates,
         max_items=max_items,
         max_summary_len=max_summary_len,
+        max_excerpt_len=max_excerpt_len,
     )
     return json.dumps(payload, ensure_ascii=False, default=str, indent=2)
