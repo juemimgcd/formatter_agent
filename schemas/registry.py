@@ -1,5 +1,7 @@
-from schemas.intent_schema import SearchIntent
+from __future__ import annotations
+
 from schemas.agent_schema import OutputSchema, OutputSchemaField
+from schemas.intent_schema import SearchIntent
 
 
 def get_generic_search_result_schema() -> OutputSchema:

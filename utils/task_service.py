@@ -1,18 +1,16 @@
-import asyncio
 import uuid
-from dataclasses import dataclass
 from sqlalchemy.ext.asyncio import AsyncSession
+from agent.runner import run_agent
 from conf.logging_conf import app_logger
-from conf.settings import settings
 from crud import (
     create_task_record,
     update_task_record_status,
 )
-from schemas.search_schema import CandidateResultItem, SearchRequest, StructuredResultItem
-from schemas.agent_schema import TaskMemory
+from schemas.registry import resolve_output_schema
+from schemas.search_schema import SearchRequest, StructuredResultItem
 from schemas.task_schema import TaskItem, TaskStatus
 from utils.excel_service import export_results_to_excel
-from utils.planner import build_execution_plan
+from utils.exceptions import format_exception
 from utils.retriever import build_rebuild_prompt_input
 from utils.search_client import search_web
 from utils.structured_result_builder import build_structured_results
@@ -26,82 +24,17 @@ from utils.task_service_helpers import (
     select_top_candidates,
 )
 from utils.intent_parser import parse_search_intent
-from utils.schema_registry import resolve_output_schema
 
 
 logger = app_logger.bind(module="task_service")
 
-TOP_K = 5
 PREVIEW_ITEM_LIMIT = 3
-REBUILD_SUMMARY_CHAR_LIMIT = 120
-
-
-@dataclass(frozen=True)
-class StructuredExtractionResult:
-    items: list[StructuredResultItem]
-    used_fallback: bool = False
 
 
 def build_task_id() -> str:
     """生成用于任务查询和日志追踪的短 task_id。"""
     # 生成一个便于查询和追踪的短任务编号。
     return uuid.uuid4().hex[:8]
-
-
-async def extract_structured_results(
-    *,
-    task_id: str,
-    query: str,
-    top_results: list[CandidateResultItem],
-    rebuilt_prompt_input_text: str,
-    max_results: int,
-) -> StructuredExtractionResult:
-    """执行结构化抽取并在失败时回退到候选结果。"""
-    # 调用结构化抽取链路，并在异常或空结果时回退到保底结果。
-    if not top_results:
-        logger.info("task={} stage=structured_results skipped=no_top_candidates", task_id)
-        return StructuredExtractionResult([])
-
-    task = build_structured_results(
-        query=query,
-        rebuilt_prompt_input_text=rebuilt_prompt_input_text,
-        max_output_items=max_results,
-    )
-    
-    timeout_seconds = settings.structured_stage_timeout_seconds
-    if timeout_seconds > 0:
-        task = asyncio.wait_for(task, timeout=timeout_seconds)
-
-    try:
-        items = await task
-    except Exception as exc:
-        logger.warning(
-            "task={} stage=structured_results_fallback reason={}", task_id, exc
-        )
-        return StructuredExtractionResult(
-            build_fallback_structured_items(
-                query=query,
-                top_results=top_results,
-                max_results=max_results,
-            ),
-            used_fallback=True,
-        )
-
-    if items:
-        return StructuredExtractionResult(items)
-
-    logger.warning(
-        "task={} stage=structured_results_fallback reason=empty_structured_results",
-        task_id,
-    )
-    return StructuredExtractionResult(
-        build_fallback_structured_items(
-            query=query,
-            top_results=top_results,
-            max_results=max_results,
-        ),
-        used_fallback=True,
-    )
 
 
 async def create_pending_task(request: SearchRequest, db: AsyncSession) -> TaskItem:
@@ -132,117 +65,70 @@ async def run_search_task(
     request: SearchRequest,
     db: AsyncSession,
 ) -> TaskItem:
-    """编排搜索、结构化、导出和任务状态更新全流程。"""
-    # 执行任务的搜索、抽取、导出和状态落库全流程。
+    """执行状态驱动的 Agent Loop，并更新任务状态。"""
+    # 任务服务只负责落库和响应适配，决策与动作执行交给 agent runtime。
     query = clean_text(request.query)
 
     try:
         await update_task_record_status(db, task_id, TaskStatus.RUNNING)
-        intent = parse_search_intent(query)
-        output_schema = resolve_output_schema(intent)
-        plan = build_execution_plan(intent, output_schema)
-        
-        memory = TaskMemory(
+        agent_output = await run_agent(
+            query,
             task_id=task_id,
-            intent_type=intent.intent_type,
-            schema_name=output_schema.name,
-            plan_id=plan.plan_id,
+            max_results=request.max_results,
+            parse_intent_func=parse_search_intent,
+            resolve_schema_func=resolve_output_schema,
+            search_func=search_web,
+            build_candidates_func=build_candidates,
+            select_top_candidates_func=select_top_candidates,
+            build_rebuild_prompt_input_func=build_rebuild_prompt_input,
+            build_structured_results_func=build_structured_results,
+            build_fallback_structured_items_func=build_fallback_structured_items,
+            evaluate_result_quality_func=evaluate_result_quality,
+            export_results_to_excel_func=export_results_to_excel,
         )
+        result = agent_output.result
 
-        logger.info(
-            "task={} stage=intent intent_type={} schema={} plan={} reason={}",
-            task_id,
-            intent.intent_type,
-            output_schema.name,
-            plan.plan_id,
-            intent.reason,
-        )
-
-        fetch_limit = max(TOP_K, request.max_results, settings.search_result_limit)
-
-        try:
-            search_results = await search_web(intent.query, max_results=fetch_limit)
-            memory.raw_result_count = len(search_results)
-        except Exception as exc:
-            logger.warning("task={} stage=results_exhausted reason={}", task_id, exc)
+        if agent_output.stop_reason == "search_failed":
+            error_message = result.error or "search failed"
+            logger.warning(
+                "task={} stage=search_failed reason={} trace={}",
+                task_id,
+                error_message,
+                [trace.model_dump(mode="json") for trace in agent_output.trace],
+            )
             await update_task_record_status(
                 db,
                 task_id=task_id,
                 status=TaskStatus.FAILED,
-                extra_data=build_result_payload([]),
+                extra_data=build_result_payload([], error_message=error_message),
             )
             return build_task_item(
                 task_id=task_id,
-                query=intent.query,
+                query=query,
                 status=TaskStatus.FAILED,
                 message="联网搜索超时或上游搜索失败，当前未能获取结果",
+                error=error_message,
                 preview_limit=PREVIEW_ITEM_LIMIT,
+                warnings=agent_output.warnings,
             )
 
-        raw_candidates = build_candidates(
-            task_id,
-            search_results,
-            search_provider=settings.search_provider,
-        )
-        candidates = select_top_candidates(
-            intent.query,
-            raw_candidates,
-            top_k=TOP_K,
-        )
-        memory.selected_candidate_count = len(candidates)
+        final_items = list(result.items)[: request.max_results]
+        excel_path = result.excel_path
+        used_fallback = result.used_fallback
+        result_quality = result.result_quality
+        warnings = list(agent_output.warnings)
+
         logger.info(
-            "task={} stage=results raw_count={} selected_count={}",
+            "task={} stage=agent_final stop_reason={} raw_count={} selected_count={} "
+            "final_count={} quality={} fallback={} trace={}",
             task_id,
-            len(raw_candidates),
-            len(candidates),
-        )
-
-        rebuilt_prompt_input_text = ""
-        if candidates:
-            rebuilt_prompt_input_text = build_rebuild_prompt_input(
-                query,
-                candidates,
-                max_items=TOP_K,
-                max_summary_len=REBUILD_SUMMARY_CHAR_LIMIT,
-            )
-            logger.info(
-                "task={} stage=rebuild_prompt chars={}",
-                task_id,
-                len(rebuilt_prompt_input_text),
-            )
-
-        extraction = await extract_structured_results(
-            task_id=task_id,
-            query=query,
-            top_results=candidates,
-            rebuilt_prompt_input_text=rebuilt_prompt_input_text,
-            max_results=request.max_results,
-        )
-        final_items = extraction.items[: request.max_results]
-        memory.structured_result_count = len(final_items)
-        memory.used_fallback = extraction.used_fallback
-        quality_check = evaluate_result_quality(
-            final_items,
-            used_fallback=memory.used_fallback,
-        )
-        memory.result_quality = quality_check.result_quality
-        memory.warnings.extend(quality_check.warnings)
-        logger.info(
-            "task={} stage=structured_results count={} quality={} warnings={}",
-            task_id,
+            agent_output.stop_reason,
+            result.raw_result_count,
+            result.selected_candidate_count,
             len(final_items),
-            memory.result_quality,
-            memory.warnings,
-        )
-
-        excel_path = export_results_to_excel(final_items) if final_items else None
-        logger.info(
-            "task={} stage=finalize final_count={} excel={} plan={} quality={}",
-            task_id,
-            len(final_items),
-            excel_path or "",
-            memory.plan_id,
-            memory.result_quality,
+            result_quality,
+            used_fallback,
+            [trace.model_dump(mode="json") for trace in agent_output.trace],
         )
         await update_task_record_status(
             db,
@@ -258,13 +144,13 @@ async def run_search_task(
             result_items=final_items,
             excel_path=excel_path,
             preview_limit=PREVIEW_ITEM_LIMIT,
-            used_fallback=memory.used_fallback,
-            result_quality=memory.result_quality,
-            warnings=memory.warnings,
+            used_fallback=used_fallback,
+            result_quality=result_quality,
+            warnings=warnings,
         )
     except Exception as exc:
-        error_message = str(exc)
-        logger.exception("task={} stage=failed error={}", task_id, exc)
+        error_message = format_exception(exc)
+        logger.exception("task={} stage=failed error={}", task_id, error_message)
         try:
             await update_task_record_status(
                 db,

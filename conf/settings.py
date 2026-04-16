@@ -30,6 +30,10 @@ class Settings(BaseSettings):
         default="redis://127.0.0.1:6379/1",
         validation_alias="CELERY_RESULT_BACKEND",
     )
+    celery_task_expires_seconds: int = Field(
+        default=300,
+        validation_alias="CELERY_TASK_EXPIRES_SECONDS",
+    )
 
     dashscope_api_key: str = Field(default="", validation_alias="DASHSCOPE_API_KEY")
     llm_base_url: str = Field(
@@ -51,10 +55,16 @@ class Settings(BaseSettings):
         validation_alias="STRUCTURED_STAGE_TIMEOUT_SECONDS",
     )
     search_provider: str = Field(
-        default="duckduckgo_html", validation_alias="SEARCH_PROVIDER"
+        default="auto", validation_alias="SEARCH_PROVIDER"
     )
     search_timeout_seconds: float = Field(
         default=12.0, validation_alias="SEARCH_TIMEOUT_SECONDS"
+    )
+    search_proxy_url: str = Field(default="", validation_alias="SEARCH_PROXY_URL")
+    search_trust_env: bool = Field(default=True, validation_alias="SEARCH_TRUST_ENV")
+    search_failure_llm_fallback_enabled: bool = Field(
+        default=True,
+        validation_alias="SEARCH_FAILURE_LLM_FALLBACK_ENABLED",
     )
     search_result_limit: int = Field(default=5, validation_alias="SEARCH_RESULT_LIMIT")
     search_region: str = Field(default="cn-zh", validation_alias="SEARCH_REGION")

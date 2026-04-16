@@ -1,4 +1,4 @@
-from schemas.common import ApiResponse
+from schemas.common import ApiResponse, ErrorData
 from schemas.search_schema import (
     CandidateResultItem,
     SearchRequest,
@@ -13,6 +13,7 @@ from schemas.task_schema import (
 
 __all__ = [
     "ApiResponse",
+    "ErrorData",
     "CandidateResultItem",
     "SearchRequest",
     "SearchResult",

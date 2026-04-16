@@ -58,7 +58,9 @@ class LoadTestReport:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Run sustained load tests against rebuild_agent HTTP API."
+        description=(
+            "Run sustained load tests against rebuild_agent HTTP API and Agent task flow."
+        )
     )
     parser.add_argument(
         "--base-url",
@@ -67,9 +69,12 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--scenario",
-        choices=("health", "create", "list", "detail", "mixed"),
+        choices=("health", "create", "list", "detail", "agent", "mixed"),
         default="health",
-        help="Load scenario to run. Use mixed only when worker/DB/Redis are ready.",
+        help=(
+            "Load scenario to run. create only measures task acceptance; "
+            "agent measures create + poll-until-terminal."
+        ),
     )
     parser.add_argument(
         "--duration-seconds",
@@ -118,6 +123,18 @@ def parse_args() -> argparse.Namespace:
         help="Append worker/request ids to create requests to avoid identical queries.",
     )
     parser.add_argument(
+        "--poll-timeout-seconds",
+        type=float,
+        default=120.0,
+        help="Max seconds to wait for an agent task to reach terminal status.",
+    )
+    parser.add_argument(
+        "--poll-interval-ms",
+        type=float,
+        default=500.0,
+        help="Polling interval for agent/detail task completion checks.",
+    )
+    parser.add_argument(
         "--output",
         choices=("text", "json"),
         default="text",
@@ -161,6 +178,125 @@ async def create_seed_task(
         return None
 
 
+def is_terminal_task_status(status: str | None) -> bool:
+    # 判断任务状态是否已经结束，供 agent 端到端压测轮询使用。
+    return status in {
+        "success",
+        "partial_success",
+        "empty_result",
+        "failed",
+        "timeout",
+    }
+
+
+def is_success_task_status(status: str | None) -> bool:
+    # 将任务终态映射为压测成功/失败口径。
+    return status in {"success", "partial_success", "empty_result"}
+
+
+async def create_agent_task_and_wait(
+    client: httpx.AsyncClient,
+    base_url: str,
+    args: argparse.Namespace,
+    *,
+    worker_id: int,
+    request_index: int,
+) -> RequestRecord:
+    # 创建一个任务并轮询详情接口，直到任务进入终态或等待超时。
+    start = time.perf_counter()
+    query = args.query
+    if args.unique_query:
+        query = f"{query} {worker_id}-{request_index}"
+
+    try:
+        create_response = await client.post(
+            f"{base_url}/api/v1/tasks/search",
+            json={"query": query, "max_results": args.max_results},
+        )
+    except Exception as exc:
+        latency_ms = (time.perf_counter() - start) * 1000
+        return RequestRecord(
+            name="AGENT create+poll terminal",
+            status_code=0,
+            latency_ms=latency_ms,
+            error=f"create failed: {type(exc).__name__}: {exc}",
+        )
+
+    if not 200 <= create_response.status_code < 300:
+        latency_ms = (time.perf_counter() - start) * 1000
+        return RequestRecord(
+            name="AGENT create+poll terminal",
+            status_code=create_response.status_code,
+            latency_ms=latency_ms,
+            error=create_response.text[:200],
+        )
+
+    try:
+        task_id = create_response.json().get("data", {}).get("task_id")
+    except Exception:
+        task_id = None
+    if not task_id:
+        latency_ms = (time.perf_counter() - start) * 1000
+        return RequestRecord(
+            name="AGENT create+poll terminal",
+            status_code=0,
+            latency_ms=latency_ms,
+            error="create response does not contain task_id",
+        )
+
+    deadline = time.perf_counter() + max(0.1, args.poll_timeout_seconds)
+    poll_interval_seconds = max(0.05, args.poll_interval_ms / 1000)
+    last_status = "unknown"
+
+    while time.perf_counter() < deadline:
+        try:
+            detail_response = await client.get(f"{base_url}/api/v1/tasks/{task_id}")
+        except Exception as exc:
+            latency_ms = (time.perf_counter() - start) * 1000
+            return RequestRecord(
+                name="AGENT create+poll terminal",
+                status_code=0,
+                latency_ms=latency_ms,
+                error=f"detail failed: {type(exc).__name__}: {exc}",
+            )
+
+        if not 200 <= detail_response.status_code < 300:
+            latency_ms = (time.perf_counter() - start) * 1000
+            return RequestRecord(
+                name="AGENT create+poll terminal",
+                status_code=detail_response.status_code,
+                latency_ms=latency_ms,
+                error=detail_response.text[:200],
+            )
+
+        try:
+            data = detail_response.json().get("data", {})
+            last_status = data.get("status")
+        except Exception:
+            last_status = "invalid_detail_response"
+
+        if is_terminal_task_status(last_status):
+            latency_ms = (time.perf_counter() - start) * 1000
+            return RequestRecord(
+                name="AGENT create+poll terminal",
+                status_code=200 if is_success_task_status(last_status) else 500,
+                latency_ms=latency_ms,
+                error=None
+                if is_success_task_status(last_status)
+                else f"terminal task status={last_status}",
+            )
+
+        await asyncio.sleep(poll_interval_seconds)
+
+    latency_ms = (time.perf_counter() - start) * 1000
+    return RequestRecord(
+        name="AGENT create+poll terminal",
+        status_code=0,
+        latency_ms=latency_ms,
+        error=f"poll timeout, last task status={last_status}",
+    )
+
+
 async def send_request(
     client: httpx.AsyncClient,
     base_url: str,
@@ -171,6 +307,15 @@ async def send_request(
     request_index: int,
     detail_task_id: str | None,
 ) -> RequestRecord:
+    if scenario == "agent":
+        return await create_agent_task_and_wait(
+            client,
+            base_url,
+            args,
+            worker_id=worker_id,
+            request_index=request_index,
+        )
+
     if scenario == "mixed":
         scenario = random.choices(
             ["health", "list", "create", "detail"],

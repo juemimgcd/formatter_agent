@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from schemas.common import ErrorData
+
 
 class AppError(Exception):
     """项目内部的通用业务异常基类。
@@ -45,17 +47,16 @@ class AppError(Exception):
         self.cause = cause
         super().__init__(self.message)
 
-    def to_error_data(self) -> dict[str, Any] | None:
+    def to_error_data(self) -> ErrorData | None:
         """用于接口层包装时的 data 字段。
 
         默认返回 {"code": ..., "details": ...} 结构；若无额外信息则返回 None。
         """
 
         # 将异常对象转换成统一响应中可序列化的错误数据。
-        payload: dict[str, Any] = {"code": self.code}
-        if self.data is not None:
-            payload["details"] = self.data
-        return payload if payload else None
+        if self.data is None and not self.code:
+            return None
+        return ErrorData(code=self.code, details=self.data)
 
 
 class WorkflowError(AppError):
@@ -76,3 +77,28 @@ class ExcelExportError(AppError):
 
     default_code = "excel_export_error"
     default_status_code = 500
+
+
+def format_single_exception(exc: BaseException) -> str:
+    """格式化单个异常对象，空 message 时至少保留异常类型。"""
+    # 有些异常（例如 TimeoutError / ConnectError）默认 message 为空，此时保留类型名。
+    exception_name = exc.__class__.__name__
+    message = str(exc).strip()
+    if message:
+        return f"{exception_name}: {message}"
+    return exception_name
+
+
+def format_exception(exc: BaseException) -> str:
+    """把异常转换成稳定可读的错误描述，并带上底层 cause 链。"""
+    # 连接错误经常把真正原因放在 __cause__ / __context__，这里一起打出来。
+    parts = [format_single_exception(exc)]
+    seen_ids = {id(exc)}
+    current = exc.__cause__ or exc.__context__
+
+    while current is not None and id(current) not in seen_ids and len(parts) < 4:
+        seen_ids.add(id(current))
+        parts.append(f"caused by {format_single_exception(current)}")
+        current = current.__cause__ or current.__context__
+
+    return "; ".join(parts)

@@ -20,7 +20,8 @@ from conf.db_conf import get_db
 from main import app
 
 
-async def _fake_db_session():
+async def fake_db_session():
+    # 为接口测试提供空数据库依赖，避免访问真实数据库。
     yield None
 
 
@@ -28,7 +29,7 @@ async def _fake_db_session():
 def override_dependencies():
     previous_debug = app.debug
     app.debug = False
-    app.dependency_overrides[get_db] = _fake_db_session
+    app.dependency_overrides[get_db] = fake_db_session
     yield
     app.debug = previous_debug
     app.dependency_overrides.clear()

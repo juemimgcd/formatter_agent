@@ -7,7 +7,8 @@ from schemas import StructuredResultItem
 from utils.excel_service import export_results_to_excel
 
 
-def _result(*, title: str, score: int) -> StructuredResultItem:
+def result_item(*, title: str, score: int) -> StructuredResultItem:
+    # 构造 Excel 导出测试使用的结构化结果。
     return StructuredResultItem(
         query="AI 产品经理",
         title=title,
@@ -26,7 +27,7 @@ def test_export_results_to_excel_creates_file(test_output_dir, monkeypatch):
     monkeypatch.setattr(settings, "output_dir", test_output_dir)
 
     excel_path = export_results_to_excel(
-        [_result(title="first", score=91), _result(title="second", score=77)],
+        [result_item(title="first", score=91), result_item(title="second", score=77)],
         filename="result.xlsx",
     )
 
@@ -38,7 +39,7 @@ def test_export_results_to_excel_preserves_expected_columns(
 ):
     monkeypatch.setattr(settings, "output_dir", test_output_dir)
 
-    excel_path = export_results_to_excel([_result(title="first", score=91)])
+    excel_path = export_results_to_excel([result_item(title="first", score=91)])
 
     dataframe = pd.read_excel(excel_path, engine="openpyxl")
 

@@ -32,7 +32,7 @@ app = FastAPI(
     title=settings.app_name,
     debug=settings.debug,
     lifespan=lifespan,
-    description="AI Agent 项目骨架：自然语言输入 -> 搜索 -> 结构化整理 -> Excel 导出",
+    description="轻量状态驱动 Agent：自然语言输入 -> Agent Loop -> 结构化整理 -> Excel 导出",
     version="0.1.0",
 )
 app.include_router(task_router, prefix=settings.api_prefix)

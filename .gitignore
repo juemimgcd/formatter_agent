@@ -10,3 +10,8 @@ __pycache__/
 
 # Test/cache
 .pytest_cache/
+.tmp/
+
+# Runtime artifacts
+outputs/*.xlsx
+tmp*.log

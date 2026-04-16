@@ -8,9 +8,10 @@ from utils.retriever import (
 )
 
 
-def _candidate(
+def candidate_item(
     *, candidate_id: str, title: str, url: str, score: float, summary: str, notes: str
 ):
+    # 构造 retriever 测试需要的候选结果对象。
     return CandidateResultItem(
         candidate_id=candidate_id,
         title=title,
@@ -31,7 +32,7 @@ def test_trim_text_preserves_short_text_and_truncates_long_text():
 
 def test_build_rebuild_prompt_payload_filters_empty_urls_and_applies_defaults():
     items = [
-        _candidate(
+        candidate_item(
             candidate_id="c1",
             title="  ",
             url="https://example.com",
@@ -39,7 +40,7 @@ def test_build_rebuild_prompt_payload_filters_empty_urls_and_applies_defaults():
             summary="a" * 30,
             notes="n" * 300,
         ),
-        _candidate(
+        candidate_item(
             candidate_id="c2",
             title="skip",
             url=" ",
@@ -68,7 +69,7 @@ def test_build_rebuild_prompt_input_returns_json_text():
     payload_text = build_rebuild_prompt_input(
         "AI 产品经理",
         [
-            _candidate(
+            candidate_item(
                 candidate_id="c1",
                 title="title",
                 url="https://example.com",

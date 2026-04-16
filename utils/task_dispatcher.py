@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 
 from conf.celery_app import celery_app
+from conf.settings import settings
 from schemas.search_schema import SearchRequest
 from schemas.task_dispatch_schema import DispatchPayload, DispatchResult
 from utils.exceptions import WorkflowError
@@ -50,8 +51,10 @@ async def dispatch_search_task(
             kwargs={
                 "task_id": task_id,
                 "request_payload": request.model_dump(mode="json"),
+                "dispatch_payload": enqueue_payload.model_dump(mode="json"),
             },
             queue=queue_name,
+            expires=settings.celery_task_expires_seconds,
         )
     except WorkflowError:
         raise

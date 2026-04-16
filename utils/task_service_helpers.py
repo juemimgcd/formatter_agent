@@ -8,18 +8,21 @@ from pydantic import BaseModel, Field
 from schemas.search_schema import CandidateResultItem, SearchResult, StructuredResultItem
 from schemas.task_schema import TaskItem, TaskStatus
 
+MIN_RELEVANCE_SCORE = 0.5
+GENERIC_CJK_CHARS = set("作品大全全集列表资料信息相关关于查询搜索内容网页结果")
+
 
 def clean_text(value: str) -> str:
     # 清洗文本中的首尾空白和多余空格。
     return re.sub(r"\s+", " ", (value or "").strip())
 
 
-def _normalize_url(url: str) -> str:
+def normalize_candidate_url(url: str) -> str:
     # 统一规范 URL 形式并移除尾部斜杠。
     return clean_text(url).rstrip("/")
 
 
-def _extract_source(url: str, fallback: str = "") -> str:
+def extract_candidate_source(url: str, fallback: str = "") -> str:
     # 从 URL 中提取来源域名，并在缺失时使用兜底来源。
     host = urlparse(url).netloc.lower()
     if host.startswith("www."):
@@ -37,7 +40,7 @@ def build_candidates(
     candidates: list[CandidateResultItem] = []
     for index, item in enumerate(search_results, start=1):
         title = clean_text(item.title)
-        url = _normalize_url(item.url)
+        url = normalize_candidate_url(item.url)
         if not title or not url:
             continue
 
@@ -46,7 +49,7 @@ def build_candidates(
                 candidate_id=f"{task_id}-{index:02d}",
                 title=title,
                 url=url,
-                source=_extract_source(url, item.source or search_provider),
+                source=extract_candidate_source(url, item.source or search_provider),
                 summary=clean_text(item.snippet),
                 extraction_notes=f"provider={search_provider}; rank={item.rank}",
                 rerank_score=max(0.0, float(len(search_results) - index + 1)),
@@ -71,7 +74,7 @@ def build_fallback_structured_items(
                 query=query,
                 title=clean_text(item.title) or "未命名结果",
                 source=clean_text(item.source) or "unknown",
-                url=_normalize_url(item.url),
+                url=normalize_candidate_url(item.url),
                 content_type="unknown",
                 region="不限",
                 role_direction="通用",
@@ -137,7 +140,12 @@ class ResultQualityCheck(BaseModel):
     warnings: list[str] = Field(default_factory=list)
 
 
-def _average_result_quality(items: list[StructuredResultItem]) -> float:
+class StructuredResultFilterCheck(BaseModel):
+    items: list[StructuredResultItem] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
+
+
+def average_result_quality(items: list[StructuredResultItem]) -> float:
     # 计算结构化结果的平均质量分，空列表按 0 分处理。
     if not items:
         return 0.0
@@ -163,7 +171,7 @@ def evaluate_result_quality(
         )
 
     warnings: list[str] = []
-    if _average_result_quality(items) < 50:
+    if average_result_quality(items) < 50:
         warnings.append("average quality_score is below 50")
     if any(not item.url for item in items):
         warnings.append("some structured items have empty url")
@@ -174,12 +182,48 @@ def evaluate_result_quality(
     return ResultQualityCheck(result_quality="high")
 
 
+def extract_query_terms(query: str) -> list[str]:
+    # 提取英文、数字和空格分隔词，用于常规关键词匹配。
+    return [term for term in clean_text(query).lower().split(" ") if term]
+
+
+def extract_significant_cjk_chars(value: str) -> set[str]:
+    # 提取中文查询中的关键字，过滤“大全/全集/列表”等泛化描述词。
+    chars: set[str] = set()
+    for char in clean_text(value):
+        if "\u4e00" <= char <= "\u9fff" and char not in GENERIC_CJK_CHARS:
+            chars.add(char)
+    return chars
+
+
+def calculate_text_relevance(query: str, text: str) -> float:
+    # 计算 query 与候选文本之间的轻量相关性，兼容无空格中文查询。
+    normalized_query = clean_text(query).lower()
+    haystack = clean_text(text).lower()
+    if not normalized_query or not haystack:
+        return 0.0
+
+    terms = extract_query_terms(normalized_query)
+    term_score = 0.0
+    if terms:
+        matches = sum(term in haystack for term in terms)
+        term_score = matches / len(terms)
+
+    query_chars = extract_significant_cjk_chars(normalized_query)
+    cjk_score = 0.0
+    if query_chars:
+        haystack_chars = extract_significant_cjk_chars(haystack)
+        cjk_score = len(query_chars & haystack_chars) / len(query_chars)
+
+    return round(max(term_score, cjk_score), 4)
+
+
 def deduplicate_candidates(items: list[CandidateResultItem]) -> list[CandidateResultItem]:
     # 按 URL 去重候选结果并统一保留规范化后的链接。
     deduplicated: list[CandidateResultItem] = []
     seen_urls: set[str] = set()
     for item in items:
-        normalized_url = _normalize_url(item.url)
+        normalized_url = normalize_candidate_url(item.url)
         if not normalized_url or normalized_url in seen_urls:
             continue
         deduplicated.append(item.model_copy(update={"url": normalized_url}))
@@ -189,12 +233,8 @@ def deduplicate_candidates(items: list[CandidateResultItem]) -> list[CandidateRe
 
 def score_candidate(query: str, item: CandidateResultItem) -> float:
     # 根据查询词命中情况为候选结果计算一个简单相关性分数。
-    terms = [term for term in clean_text(query).lower().split(" ") if term]
-    haystack = f"{item.title} {item.summary}".lower()
-    matches = sum(term in haystack for term in terms)
-    if not terms:
-        return 0.0
-    return round(matches / len(terms), 4)
+    haystack = f"{item.title} {item.summary}"
+    return calculate_text_relevance(query, haystack)
 
 
 def select_top_candidates(
@@ -204,9 +244,52 @@ def select_top_candidates(
     top_k: int,
 ) -> list[CandidateResultItem]:
     # 对候选结果按相关性排序后截取前 top_k 条。
+    scored_items = [
+        (item, score_candidate(query, item)) for item in deduplicate_candidates(items)
+    ]
+    relevant_items = [
+        (item, score)
+        for item, score in scored_items
+        if score >= MIN_RELEVANCE_SCORE
+    ]
     ranked = sorted(
-        deduplicate_candidates(items),
-        key=lambda item: score_candidate(query, item),
+        relevant_items,
+        key=lambda item_and_score: (
+            item_and_score[1],
+            item_and_score[0].rerank_score or 0.0,
+        ),
         reverse=True,
     )
-    return ranked[:top_k]
+    return [item for item, score in ranked[:top_k]]
+
+
+def filter_structured_items_by_candidates(
+    query: str,
+    items: list[StructuredResultItem],
+    candidates: list[CandidateResultItem],
+) -> StructuredResultFilterCheck:
+    # 过滤 LLM 输出，确保最终结果来自候选 URL，避免模型编造不相关结果。
+    candidate_by_url = {
+        normalize_candidate_url(candidate.url): candidate for candidate in candidates
+    }
+    filtered_items: list[StructuredResultItem] = []
+    warnings: list[str] = []
+
+    for item in items:
+        normalized_url = normalize_candidate_url(item.url)
+        candidate = candidate_by_url.get(normalized_url)
+        if candidate is None:
+            warnings.append(f"drop structured item with unknown url: {item.title}")
+            continue
+
+        candidate_text = f"{candidate.title} {candidate.summary}"
+        candidate_score = calculate_text_relevance(query, candidate_text)
+        item_text = f"{item.title} {item.summary}"
+        item_score = calculate_text_relevance(query, item_text)
+        if max(candidate_score, item_score) < MIN_RELEVANCE_SCORE:
+            warnings.append(f"drop low relevance structured item: {item.title}")
+            continue
+
+        filtered_items.append(item)
+
+    return StructuredResultFilterCheck(items=filtered_items, warnings=warnings)

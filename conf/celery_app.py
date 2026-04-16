@@ -20,6 +20,7 @@ def build_celery_app() -> Celery:
         task_track_started=True,
         task_time_limit=90,
         task_soft_time_limit=75,
+        task_expires=settings.celery_task_expires_seconds,
         task_acks_late=True,
     )
     if sys.platform.startswith("win"):

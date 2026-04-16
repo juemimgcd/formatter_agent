@@ -27,9 +27,19 @@ class BenchmarkResult:
     sample_bodies: list[dict[str, Any]]
 
 
+@dataclass(slots=True)
+class AgentCompletionProbe:
+    success: bool
+    status_code: int
+    task_id: str | None = None
+    task_status: str | None = None
+    total_items: int = 0
+    error: str | None = None
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Benchmark rebuild_agent HTTP endpoints."
+        description="Benchmark rebuild_agent HTTP endpoints and optional Agent task completion."
     )
     parser.add_argument(
         "--base-url",
@@ -108,6 +118,35 @@ def parse_args() -> argparse.Namespace:
         help="Delay before benchmarking task detail after create.",
     )
     parser.add_argument(
+        "--include-agent-completion",
+        action="store_true",
+        help="Also benchmark create + poll-until-terminal Agent task completion.",
+    )
+    parser.add_argument(
+        "--agent-completion-total",
+        type=int,
+        default=3,
+        help="Total Agent completion probes when --include-agent-completion is enabled.",
+    )
+    parser.add_argument(
+        "--agent-completion-concurrency",
+        type=int,
+        default=1,
+        help="Concurrency for Agent completion probes.",
+    )
+    parser.add_argument(
+        "--poll-timeout-seconds",
+        type=float,
+        default=120.0,
+        help="Max seconds to wait for a task terminal status.",
+    )
+    parser.add_argument(
+        "--poll-interval-ms",
+        type=float,
+        default=500.0,
+        help="Polling interval for Agent completion probes.",
+    )
+    parser.add_argument(
         "--skip-health",
         action="store_true",
         help="Skip GET /health benchmark.",
@@ -141,6 +180,22 @@ def percentile(values: list[float], ratio: float) -> float:
     if lower == upper:
         return ordered[lower]
     return ordered[lower] + (ordered[upper] - ordered[lower]) * (index - lower)
+
+
+def is_terminal_task_status(status: str | None) -> bool:
+    # 判断任务是否已经进入终态。
+    return status in {
+        "success",
+        "partial_success",
+        "empty_result",
+        "failed",
+        "timeout",
+    }
+
+
+def is_success_task_status(status: str | None) -> bool:
+    # 将任务终态转换成基准测试的成功/失败口径。
+    return status in {"success", "partial_success", "empty_result"}
 
 
 async def warmup(
@@ -216,6 +271,135 @@ async def run_case(
         sample_bodies=sample_bodies,
     )
     return result, responses
+
+
+async def create_agent_task_and_wait(
+    client: httpx.AsyncClient,
+    base_url: str,
+    *,
+    query: str,
+    max_results: int,
+    poll_timeout_seconds: float,
+    poll_interval_ms: float,
+) -> AgentCompletionProbe:
+    # 创建任务后轮询详情接口，返回 Agent 端到端执行结果摘要。
+    create_response = await client.post(
+        f"{base_url}/api/v1/tasks/search",
+        json={"query": query, "max_results": max_results},
+    )
+    if not 200 <= create_response.status_code < 300:
+        return AgentCompletionProbe(
+            success=False,
+            status_code=create_response.status_code,
+            error=create_response.text[:200],
+        )
+
+    task_id = create_response.json().get("data", {}).get("task_id")
+    if not task_id:
+        return AgentCompletionProbe(
+            success=False,
+            status_code=0,
+            error="create response does not contain task_id",
+        )
+
+    deadline = time.perf_counter() + max(0.1, poll_timeout_seconds)
+    poll_interval_seconds = max(0.05, poll_interval_ms / 1000)
+    last_status = "unknown"
+
+    while time.perf_counter() < deadline:
+        detail_response = await client.get(f"{base_url}/api/v1/tasks/{task_id}")
+        if not 200 <= detail_response.status_code < 300:
+            return AgentCompletionProbe(
+                success=False,
+                status_code=detail_response.status_code,
+                task_id=task_id,
+                error=detail_response.text[:200],
+            )
+
+        data = detail_response.json().get("data", {})
+        last_status = data.get("status")
+        if is_terminal_task_status(last_status):
+            success = is_success_task_status(last_status)
+            return AgentCompletionProbe(
+                success=success,
+                status_code=200 if success else 500,
+                task_id=task_id,
+                task_status=last_status,
+                total_items=data.get("total_items", 0),
+                error=None if success else f"terminal task status={last_status}",
+            )
+
+        await asyncio.sleep(poll_interval_seconds)
+
+    return AgentCompletionProbe(
+        success=False,
+        status_code=0,
+        task_id=task_id,
+        task_status=last_status,
+        error=f"poll timeout, last task status={last_status}",
+    )
+
+
+async def run_agent_completion_case(
+    client: httpx.AsyncClient,
+    *,
+    base_url: str,
+    query: str,
+    max_results: int,
+    total: int,
+    concurrency: int,
+    poll_timeout_seconds: float,
+    poll_interval_ms: float,
+) -> BenchmarkResult:
+    # 固定次数执行 Agent 端到端任务，用于观察真实任务完成耗时。
+    latencies: list[float] = []
+    statuses: list[int] = []
+    sample_bodies: list[dict[str, Any]] = []
+    semaphore = asyncio.Semaphore(max(1, concurrency))
+
+    async def one(index: int) -> None:
+        async with semaphore:
+            start = time.perf_counter()
+            try:
+                result = await create_agent_task_and_wait(
+                    client,
+                    base_url,
+                    query=query,
+                    max_results=max_results,
+                    poll_timeout_seconds=poll_timeout_seconds,
+                    poll_interval_ms=poll_interval_ms,
+                )
+            except Exception as exc:
+                result = AgentCompletionProbe(
+                    success=False,
+                    status_code=0,
+                    error=f"{type(exc).__name__}: {exc}",
+                )
+
+            latencies.append((time.perf_counter() - start) * 1000)
+            statuses.append(result.status_code)
+            if index < 3:
+                sample_bodies.append(asdict(result))
+
+    start_all = time.perf_counter()
+    await asyncio.gather(*[one(i) for i in range(total)])
+    duration = time.perf_counter() - start_all
+    success = sum(1 for status in statuses if 200 <= status < 300)
+
+    return BenchmarkResult(
+        name="AGENT create+poll terminal",
+        total=total,
+        concurrency=concurrency,
+        success=success,
+        errors=total - success,
+        avg_ms=round(statistics.mean(latencies), 2) if latencies else 0.0,
+        p50_ms=round(percentile(latencies, 0.50), 2),
+        p95_ms=round(percentile(latencies, 0.95), 2),
+        min_ms=round(min(latencies), 2) if latencies else 0.0,
+        max_ms=round(max(latencies), 2) if latencies else 0.0,
+        rps=round(total / duration, 2) if duration > 0 else 0.0,
+        sample_bodies=sample_bodies,
+    )
 
 
 def extract_task_id(responses: list[httpx.Response | None]) -> str | None:
@@ -306,6 +490,20 @@ async def main() -> None:
                     concurrency=args.detail_concurrency,
                 )
                 results.append(detail_result)
+
+        if args.include_agent_completion:
+            results.append(
+                await run_agent_completion_case(
+                    client,
+                    base_url=base_url,
+                    query=args.query,
+                    max_results=args.max_results,
+                    total=args.agent_completion_total,
+                    concurrency=args.agent_completion_concurrency,
+                    poll_timeout_seconds=args.poll_timeout_seconds,
+                    poll_interval_ms=args.poll_interval_ms,
+                )
+            )
 
     if args.output == "json":
         print(

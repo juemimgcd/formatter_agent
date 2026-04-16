@@ -7,7 +7,7 @@ from schemas import SearchRequest, SearchResult, TaskStatus
 from utils import task_service
 
 
-def _search_result(
+def search_result_item(
     *,
     title: str,
     url: str,
@@ -15,6 +15,7 @@ def _search_result(
     source: str = "example.com",
     rank: int = 1,
 ) -> SearchResult:
+    # 构造任务服务测试使用的搜索结果对象。
     return SearchResult(
         title=title,
         url=url,
@@ -85,20 +86,26 @@ async def test_run_search_task_returns_timeout_message_when_search_fails(monkeyp
     db = AsyncMock()
 
     recorded_statuses: list[str] = []
+    recorded_extra_data: list[dict | None] = []
 
     async def fake_update_task_record_status(
         db_session, task_id, status, extra_data=None
     ):
         recorded_statuses.append(status)
+        recorded_extra_data.append(extra_data)
         return None
 
     async def fake_search_web(query, *, max_results):
-        raise TimeoutError("search timeout")
+        raise TimeoutError()
 
     monkeypatch.setattr(
         task_service, "update_task_record_status", fake_update_task_record_status
     )
     monkeypatch.setattr(task_service, "search_web", fake_search_web)
+    monkeypatch.setattr(
+        "tools.tool_runner.settings.search_failure_llm_fallback_enabled",
+        False,
+    )
 
     result = await task_service.run_search_task(
         task_id="task-002",
@@ -114,6 +121,9 @@ async def test_run_search_task_returns_timeout_message_when_search_fails(monkeyp
     assert result.total_items == 0
     assert result.preview_items == []
     assert result.message == "联网搜索超时或上游搜索失败，当前未能获取结果"
+    assert result.error == "TimeoutError"
+    assert recorded_extra_data[-1] is not None
+    assert recorded_extra_data[-1]["error_message"] == "TimeoutError"
 
 
 @pytest.mark.asyncio
@@ -166,10 +176,10 @@ async def test_run_search_task_uses_fallback_when_structured_stage_times_out(
 
     async def fake_search_web(query, *, max_results):
         return [
-            _search_result(
-                title="搜索结果",
+            search_result_item(
+                title="AI 产品经理搜索结果",
                 url="https://example.com/item",
-                snippet="这是搜索摘要，用于降级路径验证。",
+                snippet="这是 AI 产品经理搜索摘要，用于降级路径验证。",
                 rank=1,
             )
         ]
@@ -198,11 +208,11 @@ async def test_run_search_task_uses_fallback_when_structured_stage_times_out(
 
     assert result.status == TaskStatus.SUCCESS
     assert result.total_items == 1
-    assert result.preview_items[0].title == "搜索结果"
-    assert result.result_items[0].title == "搜索结果"
+    assert result.preview_items[0].title == "AI 产品经理搜索结果"
+    assert result.result_items[0].title == "AI 产品经理搜索结果"
     final_update = status_updates[-1][1]
     assert final_update is not None
-    assert final_update["result_payload"][0]["title"] == "搜索结果"
+    assert final_update["result_payload"][0]["title"] == "AI 产品经理搜索结果"
 
 
 @pytest.mark.asyncio
@@ -220,10 +230,10 @@ async def test_run_search_task_uses_select_top_candidates_with_fixed_top_k_of_fi
 
     async def fake_search_web(query, *, max_results):
         return [
-            _search_result(
-                title=f"搜索结果{index}",
+            search_result_item(
+                title=f"AI 产品经理搜索结果{index}",
                 url=f"https://example.com/item-{index}",
-                snippet="这是搜索摘要，用于验证固定 top_k 行为。",
+                snippet="这是 AI 产品经理搜索摘要，用于验证固定 top_k 行为。",
                 rank=index + 1,
             )
             for index in range(6)
@@ -314,7 +324,7 @@ async def test_run_search_task_falls_back_when_structured_results_are_empty(
 
     async def fake_search_web(query, *, max_results):
         return [
-            _search_result(
+            search_result_item(
                 title="宋词大全",
                 url="https://example.com/songci",
                 snippet="收录大量宋词内容。",
@@ -360,16 +370,16 @@ async def test_run_search_task_keeps_structured_results_order_and_duplicates(
 
     async def fake_search_web(query, *, max_results):
         return [
-            _search_result(
-                title="搜索结果1",
+            search_result_item(
+                title="AI 产品经理搜索结果1",
                 url="https://example.com/item-1",
-                snippet="搜索摘要1",
+                snippet="AI 产品经理搜索摘要1",
                 rank=1,
             ),
-            _search_result(
-                title="搜索结果2",
+            search_result_item(
+                title="AI 产品经理搜索结果2",
                 url="https://example.com/item-2",
-                snippet="搜索摘要2",
+                snippet="AI 产品经理搜索摘要2",
                 rank=2,
             ),
         ]
@@ -382,7 +392,7 @@ async def test_run_search_task_keeps_structured_results_order_and_duplicates(
                 query=query,
                 title="重复结果",
                 source="web",
-                url="https://example.com/dup",
+                url="https://example.com/item-1",
                 summary="第一条重复结果",
                 quality_score=80,
             ),
@@ -390,7 +400,7 @@ async def test_run_search_task_keeps_structured_results_order_and_duplicates(
                 query=query,
                 title="重复结果",
                 source="web",
-                url="https://example.com/dup",
+                url="https://example.com/item-1",
                 summary="第二条重复结果",
                 quality_score=65,
             ),
