@@ -1,7 +1,3 @@
-# Formatter Agent
+# rebuild_agent
 
-This repository implements a powerful text formatting agent written in Python. It provides flexible interfaces for formatting, validating, and transforming text data, supporting various use cases such as code formatting, markdown/text transformation, and structured document parsing. The project aims to offer extensibility and ease of integration into other Python applications or automation workflows.
-
-## License
-
-MIT License. See [LICENSE](LICENSE) for details.
+一个通用的 `Natural Language Query -> Structured Data Output` 轻量 Agent。用户提交开放领域自然语言查询后，API 负责创建任务并入队，Celery worker 通过显式 Agent ...（以下内容保持原样恢复）...
